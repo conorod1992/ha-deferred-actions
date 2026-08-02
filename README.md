@@ -2,11 +2,11 @@
 
 Deferred Actions is a Home Assistant custom integration for persistent, one-off action
 sequences. It keeps multiple independent jobs, schedules only the next due callback,
-survives restarts and exposes the same queue through Home Assistant actions, native LLM
-tools, an administrator-only sidebar panel and `sensor.deferred_actions`.
+survives restarts and exposes the same queue through normal Home Assistant actions, an
+administrator-only sidebar panel and `sensor.deferred_actions`.
 
-**Minimum Home Assistant version: 2026.8.0.** This release uses the current contributed
-LLM-tools platform (`llm.py`) introduced in that API generation.
+**Minimum Home Assistant version: 2024.12.0.** Deferred Actions intentionally does not
+contribute LLM tools, a conversation agent or language-specific voice intents.
 
 Recurring work deliberately belongs in Home Assistant automations or schedules. Deferred
 Actions does not add sentence grammar, Hassil sentences or a conversation agent. Users can
@@ -23,7 +23,6 @@ call its normal actions from their own sentence-triggered automations.
 - Explicitly confirmed bulk cancellation and history deletion
 - Semantic job keys with keep, replace, cancel or reject conflict behavior
 - `run_for` for immediate start plus deferred end actions
-- Native Home Assistant LLM tools with ambiguity responses and compact spoken output
 - Responsive, theme-aware Lit panel with WebSocket push updates (no backend polling)
 - One push-updated summary sensor and concise Home Assistant lifecycle events
 - Redacted diagnostics
@@ -42,8 +41,8 @@ call its normal actions from their own sentence-triggered automations.
 For manual installation, copy `custom_components/deferred_actions` into the matching
 directory under your Home Assistant configuration, restart, and complete steps 5–6.
 
-To use voice/LLM features, enable the Deferred Actions tools in a compatible assistant’s
-Home Assistant LLM API configuration. The integration does not create its own conversation agent.
+For fixed voice phrases, create a Home Assistant sentence-triggered automation that calls one
+of the integration's normal actions. Deferred Actions does not expose native LLM tools.
 
 ## Examples
 
@@ -173,7 +172,6 @@ history_enabled: true
 history_retention_days: 7
 maximum_history_records: 500
 default_conflict_mode: keep_all
-default_maximum_llm_list_results: 10
 frontend_panel_enabled: true
 ```
 
@@ -203,13 +201,13 @@ Deferred Actions stores Home Assistant action sequences and executes them later.
 The first release does not recursively inspect all nested actions or reliably revalidate
 every eventual action against the permissions of the original caller.
 
-Access to unrestricted Deferred Actions services or LLM tools should therefore be treated
-as permission to schedule any Home Assistant action sequence those interfaces can submit.
+Access to unrestricted Deferred Actions actions should therefore be treated as permission
+to schedule any Home Assistant action sequence those interfaces can submit.
 
-Do not expose unrestricted scheduling tools to untrusted users, assistants or external clients.
+Do not expose unrestricted scheduling actions to untrusted users or external clients.
 
-The calling voice assistant or LLM remains responsible for deciding which actions it may
-perform immediately or defer.
+Any automation, script or external caller remains responsible for deciding which actions it
+may perform immediately or defer.
 
 The integration stores available source and context metadata for attribution, but this must
 not be treated as a complete security boundary. Full conversation text is never stored.
@@ -221,7 +219,7 @@ coalesced and flushed on unload. Invalid records are quarantined from the live q
 reported as a count in diagnostics instead of preventing setup. Completed/cancelled/failed/
 missed jobs are cleaned at startup, every six hours, or on demand.
 
-Routine UI/LLM summaries never render templates or include service data. Diagnostics redact
+Routine UI summaries never render templates or include service data. Diagnostics redact
 action sequences, descriptions, errors and user identifiers.
 
 ## Troubleshooting
@@ -233,12 +231,12 @@ action sequences, descriptions, errors and user identifiers.
   and template failures affect that job only; other due jobs continue.
 - **A job is `missed`:** it exceeded the configured startup/resume overdue policy. Use
   `execute_now`, or duplicate/reschedule it.
-- **Voice tools are missing:** enable the integration’s contributed tools in a compatible Home
-  Assistant LLM API. Fixed phrases require your own sentence-triggered automation.
+- **Voice control:** create a sentence-triggered automation that calls a Deferred Actions action.
+  The integration intentionally does not contribute native LLM tools or sentence grammar.
 
 ## Development
 
-Python 3.14 uses Ruff and pytest with Home Assistant’s established fixtures. The panel uses Lit,
+Python 3.12 or newer uses Ruff and pytest with Home Assistant’s established fixtures. The panel uses Lit,
 TypeScript, ESLint, Vitest and Vite:
 
 ```text
