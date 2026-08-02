@@ -146,6 +146,8 @@ class DeferredActionsManager:
         self._cancel_next = async_track_point_in_utc_time(self.hass, self._async_due_callback, due)
 
     async def _async_due_callback(self, now: datetime) -> None:
+        if self._cancel_next:
+            self._cancel_next()
         self._cancel_next = None
         due: list[DeferredJob] = []
         async with self._lock:
