@@ -2388,6 +2388,8 @@ let W = class extends Ce {
       Source: t.source,
       "Job key": t.job_key || "—",
       Tags: t.tags.join(", ") || "—",
+      "Target hints": t.target_entities.join(", ") || "—",
+      Overdue: new Date(t.execute_at).getTime() < Date.now() && ["pending", "paused"].includes(t.status) ? "Yes" : "No",
       Revision: String(t.revision),
       "Last error": t.last_error || "—"
     }).map(([n, r]) => R`<dt>${n}</dt><dd>${r}</dd>`)}
@@ -2406,9 +2408,10 @@ let W = class extends Ce {
     }}>✕</button></header>
       <label>Name<input name="name" required .value=${t?.name ?? ""}></label>
       <label>Description<textarea name="description">${t?.description ?? ""}</textarea></label>
-      ${t ? M : R`<div class="two"><label>Delay hours<input name="hours" type="number" min="0" value="0"></label><label>Delay minutes<input name="minutes" type="number" min="0" value="20"></label></div>`}
+      ${t ? M : R`<label>Absolute execution time (optional, ISO 8601 with UTC offset)<input name="execute_at" placeholder="2026-08-02T21:00:00+01:00"></label><div class="two"><label>Or delay hours<input name="hours" type="number" min="0" value="0"></label><label>Delay minutes<input name="minutes" type="number" min="0" value="20"></label></div>`}
       <label>Job key<input name="job_key" .value=${t?.job_key ?? ""}></label>
       <label>Tags (comma separated)<input name="tags" .value=${t?.tags.join(", ") ?? ""}></label>
+      <label>Target entity hints (comma separated)<input name="target_entities" .value=${t?.target_entities.join(", ") ?? ""}></label>
       ${t ? M : R`<label>Conflict mode<select name="conflict_mode"><option>keep_all</option><option>replace_same_key</option><option>cancel_same_key</option><option>reject_same_key</option></select></label>`}
       <div class="mode"><button type="button" class=${this.editor?.mode === "simple" ? "active" : ""} @click=${() => {
       this.editor = { ...this.editor, mode: "simple" };
@@ -2432,13 +2435,19 @@ let W = class extends Ce {
         description: String(n.get("description")) || void 0,
         job_key: String(n.get("job_key")) || void 0,
         tags: String(n.get("tags")).split(",").map((o) => o.trim()).filter(Boolean),
+        target_entities: String(n.get("target_entities")).split(",").map((o) => o.trim()).filter(Boolean),
         sequence: r
       };
-      this.busy = !0, this.editor?.job ? await Ot(this.hass, { job_id: this.editor.job.id, expected_revision: this.editor.job.revision, ...l }) : await kt(this.hass, {
-        ...l,
-        delay: { hours: Number(n.get("hours")), minutes: Number(n.get("minutes")) },
-        conflict_mode: String(n.get("conflict_mode"))
-      }), this.editor = void 0;
+      if (this.busy = !0, this.editor?.job) await Ot(this.hass, { job_id: this.editor.job.id, expected_revision: this.editor.job.revision, ...l });
+      else {
+        const o = String(n.get("execute_at") ?? "").trim();
+        await kt(this.hass, {
+          ...l,
+          ...o ? { execute_at: o } : { delay: { hours: Number(n.get("hours")), minutes: Number(n.get("minutes")) } },
+          conflict_mode: String(n.get("conflict_mode"))
+        });
+      }
+      this.editor = void 0;
     } catch (r) {
       this.error = String(r);
     } finally {

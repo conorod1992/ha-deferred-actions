@@ -141,6 +141,8 @@ export class DeferredActionsPanel extends LitElement {
           "Scheduled UTC": job.execute_at, "Scheduled local": job.execute_at_local,
           Created: job.created_at, Modified: job.modified_at, Completed: job.completed_at || "—",
           Source: job.source, "Job key": job.job_key || "—", Tags: job.tags.join(", ") || "—",
+          "Target hints": job.target_entities.join(", ") || "—",
+          Overdue: new Date(job.execute_at).getTime() < Date.now() && ["pending", "paused"].includes(job.status) ? "Yes" : "No",
           Revision: String(job.revision), "Last error": job.last_error || "—",
         }).map(([label, value]) => html`<dt>${label}</dt><dd>${value}</dd>`)}
       </dl>
@@ -157,9 +159,10 @@ export class DeferredActionsPanel extends LitElement {
       <header><h2>${job ? "Edit deferred action" : "Add deferred action"}</h2><button type="button" @click=${() => { this.editor = undefined; }}>✕</button></header>
       <label>Name<input name="name" required .value=${job?.name ?? ""}></label>
       <label>Description<textarea name="description">${job?.description ?? ""}</textarea></label>
-      ${job ? nothing : html`<div class="two"><label>Delay hours<input name="hours" type="number" min="0" value="0"></label><label>Delay minutes<input name="minutes" type="number" min="0" value="20"></label></div>`}
+      ${job ? nothing : html`<label>Absolute execution time (optional, ISO 8601 with UTC offset)<input name="execute_at" placeholder="2026-08-02T21:00:00+01:00"></label><div class="two"><label>Or delay hours<input name="hours" type="number" min="0" value="0"></label><label>Delay minutes<input name="minutes" type="number" min="0" value="20"></label></div>`}
       <label>Job key<input name="job_key" .value=${job?.job_key ?? ""}></label>
       <label>Tags (comma separated)<input name="tags" .value=${job?.tags.join(", ") ?? ""}></label>
+      <label>Target entity hints (comma separated)<input name="target_entities" .value=${job?.target_entities.join(", ") ?? ""}></label>
       ${job ? nothing : html`<label>Conflict mode<select name="conflict_mode"><option>keep_all</option><option>replace_same_key</option><option>cancel_same_key</option><option>reject_same_key</option></select></label>`}
       <div class="mode"><button type="button" class=${this.editor?.mode === "simple" ? "active" : ""} @click=${() => { this.editor = { ...this.editor!, mode: "simple" }; }}>Simple action</button><button type="button" class=${this.editor?.mode === "advanced" ? "active" : ""} @click=${() => { this.editor = { ...this.editor!, mode: "advanced" }; }}>Advanced YAML</button></div>
       ${this.editor?.mode === "simple" ? html`<label>Action<input name="action" placeholder="light.turn_off"></label><label>Entity ID<input name="entity_id" placeholder="light.porch"></label>` : html`<label>Action sequence YAML<textarea class="yaml" name="yaml" required>${dump(job?.sequence ?? [{ action: "light.turn_off", target: { entity_id: "light.porch" } }], { noRefs: true })}</textarea></label>`}
@@ -178,14 +181,19 @@ export class DeferredActionsPanel extends LitElement {
       const common = {
         name: String(form.get("name")), description: String(form.get("description")) || undefined,
         job_key: String(form.get("job_key")) || undefined,
-        tags: String(form.get("tags")).split(",").map((tag) => tag.trim()).filter(Boolean), sequence,
+        tags: String(form.get("tags")).split(",").map((tag) => tag.trim()).filter(Boolean),
+        target_entities: String(form.get("target_entities")).split(",").map((entity) => entity.trim()).filter(Boolean), sequence,
       };
       this.busy = true;
       if (this.editor?.job) await updateJob(this.hass, { job_id: this.editor.job.id, expected_revision: this.editor.job.revision, ...common });
-      else await createJob(this.hass, {
-        ...common, delay: { hours: Number(form.get("hours")), minutes: Number(form.get("minutes")) },
-        conflict_mode: String(form.get("conflict_mode")),
-      });
+      else {
+        const executeAt = String(form.get("execute_at") ?? "").trim();
+        await createJob(this.hass, {
+          ...common,
+          ...(executeAt ? { execute_at: executeAt } : { delay: { hours: Number(form.get("hours")), minutes: Number(form.get("minutes")) } }),
+          conflict_mode: String(form.get("conflict_mode")),
+        });
+      }
       this.editor = undefined;
     } catch (error) { this.error = String(error); }
     finally { this.busy = false; }
