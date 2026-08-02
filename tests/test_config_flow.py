@@ -17,9 +17,9 @@ async def test_config_flow(hass) -> None:
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
-    assert result["type"] is config_entries.FlowResultType.FORM
+    assert result["type"] == "form"
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
-    assert result["type"] is config_entries.FlowResultType.CREATE_ENTRY
+    assert result["type"] == "create_entry"
 
 
 async def test_single_instance(hass) -> None:
@@ -27,7 +27,7 @@ async def test_single_instance(hass) -> None:
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
-    assert result["type"] is config_entries.FlowResultType.ABORT
+    assert result["type"] == "abort"
     assert result["reason"] == "already_configured"
 
 
@@ -48,5 +48,5 @@ async def test_options_flow(hass) -> None:
             "frontend_panel_enabled": False,
         },
     )
-    assert result["type"] is config_entries.FlowResultType.CREATE_ENTRY
+    assert result["type"] == "create_entry"
     assert entry.options["overdue_policy"] == "skip"
