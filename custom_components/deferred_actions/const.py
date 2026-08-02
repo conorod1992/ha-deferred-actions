@@ -64,7 +64,7 @@ HISTORY_CLEANUP_INTERVAL: Final = timedelta(hours=6)
 
 INVERSE_ACTIONS: Final = {
     "light.turn_on": "light.turn_off",
-    "switch.turn_on": "light.turn_off",
+    "switch.turn_on": "switch.turn_off",
     "fan.turn_on": "fan.turn_off",
     "input_boolean.turn_on": "input_boolean.turn_off",
     "media_player.media_play": "media_player.media_pause",
