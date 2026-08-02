@@ -1,0 +1,22 @@
+[project]
+name = "ha-deferred-actions"
+version = "0.1.0"
+description = "Persistent one-off action scheduler for Home Assistant"
+requires-python = ">=3.13"
+license = "MIT"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
