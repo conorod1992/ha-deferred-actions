@@ -44,7 +44,6 @@ async def test_options_flow(hass) -> None:
             "history_retention_days": 14,
             "maximum_history_records": 200,
             "default_conflict_mode": "keep_all",
-            "default_maximum_llm_list_results": 5,
             "frontend_panel_enabled": False,
         },
     )

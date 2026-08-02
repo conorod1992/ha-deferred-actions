@@ -11,7 +11,6 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_DEFAULT_CONFLICT_MODE,
-    CONF_DEFAULT_LLM_LIMIT,
     CONF_HISTORY_ENABLED,
     CONF_HISTORY_RETENTION_DAYS,
     CONF_MAX_HISTORY_RECORDS,
@@ -45,7 +44,7 @@ class DeferredActionsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class DeferredActionsOptionsFlow(config_entries.OptionsFlow):
-    """Edit scheduler, history, LLM and panel behavior."""
+    """Edit scheduler, history and panel behavior."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         if user_input is not None:
@@ -73,9 +72,6 @@ class DeferredActionsOptionsFlow(config_entries.OptionsFlow):
                 ): selector.SelectSelector(
                     selector.SelectSelectorConfig(options=list(CONFLICT_MODES))
                 ),
-                vol.Required(
-                    CONF_DEFAULT_LLM_LIMIT, default=values[CONF_DEFAULT_LLM_LIMIT]
-                ): vol.All(int, vol.Range(min=1, max=100)),
                 vol.Required(CONF_PANEL_ENABLED, default=values[CONF_PANEL_ENABLED]): bool,
             }
         )

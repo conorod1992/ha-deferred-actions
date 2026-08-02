@@ -15,6 +15,23 @@ jobs:
       - run: ruff format --check .
       - run: ruff check .
       - run: pytest
+  compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install homeassistant==2024.12.5
+      - name: Import every integration module on Home Assistant 2024.12
+        run: |
+          python - <<'PY'
+          import importlib
+          import pkgutil
+          import custom_components.deferred_actions as integration
+
+          for module in pkgutil.iter_modules(integration.__path__):
+              importlib.import_module(f"{integration.__name__}.{module.name}")
+          PY
   frontend:
     runs-on: ubuntu-latest
     defaults: {run: {working-directory: frontend}}

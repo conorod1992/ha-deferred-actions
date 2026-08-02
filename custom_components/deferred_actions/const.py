@@ -7,7 +7,7 @@ from typing import Final
 
 DOMAIN: Final = "deferred_actions"
 NAME: Final = "Deferred Actions"
-VERSION: Final = "0.1.0"
+VERSION: Final = "0.2.0"
 PLATFORMS: Final = ["sensor"]
 
 STORAGE_KEY: Final = f"{DOMAIN}.jobs"
@@ -20,7 +20,6 @@ CONF_HISTORY_ENABLED: Final = "history_enabled"
 CONF_HISTORY_RETENTION_DAYS: Final = "history_retention_days"
 CONF_MAX_HISTORY_RECORDS: Final = "maximum_history_records"
 CONF_DEFAULT_CONFLICT_MODE: Final = "default_conflict_mode"
-CONF_DEFAULT_LLM_LIMIT: Final = "default_maximum_llm_list_results"
 CONF_PANEL_ENABLED: Final = "frontend_panel_enabled"
 
 OVERDUE_EXECUTE: Final = "execute"
@@ -46,7 +45,6 @@ DEFAULT_OPTIONS: Final = {
     CONF_HISTORY_RETENTION_DAYS: 7,
     CONF_MAX_HISTORY_RECORDS: 500,
     CONF_DEFAULT_CONFLICT_MODE: CONFLICT_KEEP_ALL,
-    CONF_DEFAULT_LLM_LIMIT: 10,
     CONF_PANEL_ENABLED: True,
 }
 

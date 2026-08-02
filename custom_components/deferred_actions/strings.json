@@ -15,7 +15,6 @@
           "history_retention_days": "History retention (days)",
           "maximum_history_records": "Maximum history records",
           "default_conflict_mode": "Default job-key conflict mode",
-          "default_maximum_llm_list_results": "Default maximum LLM list results",
           "frontend_panel_enabled": "Enable sidebar panel"
         }
       }
