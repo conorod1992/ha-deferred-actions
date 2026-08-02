@@ -1,7 +1,6 @@
 {
   "domain": "deferred_actions",
   "name": "Deferred Actions",
-  "version": "0.1.0",
   "codeowners": ["@conorod1992"],
   "config_flow": true,
   "dependencies": ["frontend", "http", "websocket_api"],
@@ -9,5 +8,6 @@
   "integration_type": "helper",
   "iot_class": "calculated",
   "issue_tracker": "https://github.com/conorod1992/ha-deferred-actions/issues",
-  "requirements": []
+  "requirements": [],
+  "version": "0.1.0"
 }
