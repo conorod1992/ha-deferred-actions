@@ -1,9 +1,16 @@
 """Config and options flow tests."""
 
+import pytest
 from homeassistant import config_entries
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.deferred_actions.const import DOMAIN
+
+
+@pytest.fixture(autouse=True)
+def mock_loaded_core_dependencies(hass) -> None:
+    """Config-flow tests do not need to set up the full frontend stack."""
+    hass.config.components.update({"frontend", "http", "websocket_api"})
 
 
 async def test_config_flow(hass) -> None:
