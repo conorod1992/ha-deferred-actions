@@ -1,0 +1,25 @@
+{
+  "title": "Deferred Actions",
+  "config": {
+    "step": {"user": {"title": "Set up Deferred Actions", "description": "Create the persistent one-off action scheduler."}},
+    "abort": {"already_configured": "Deferred Actions is already configured."}
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Deferred Actions options",
+        "data": {
+          "overdue_policy": "Overdue policy",
+          "overdue_grace_minutes": "Overdue grace period (minutes)",
+          "history_enabled": "Retain history",
+          "history_retention_days": "History retention (days)",
+          "maximum_history_records": "Maximum history records",
+          "default_conflict_mode": "Default job-key conflict mode",
+          "default_maximum_llm_list_results": "Default maximum LLM list results",
+          "frontend_panel_enabled": "Enable sidebar panel"
+        }
+      }
+    }
+  },
+  "entity": {"sensor": {"deferred_actions": {"name": "Deferred Actions"}}}
+}

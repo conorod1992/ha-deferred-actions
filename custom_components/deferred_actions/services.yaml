@@ -1,0 +1,123 @@
+create:
+  name: Create
+  description: Schedule a complete Home Assistant action sequence once.
+  fields:
+    name: {required: true, selector: {text: {}}}
+    description: {selector: {text: {multiline: true}}}
+    execute_at: {description: Offset-aware ISO 8601 date-time., selector: {text: {}}}
+    delay: {selector: {duration: {enable_day: true}}}
+    sequence: {required: true, selector: {object: {}}}
+    job_key: {selector: {text: {}}}
+    tags: {selector: {text: {multiple: true}}}
+    conflict_mode:
+      selector: {select: {options: [keep_all, replace_same_key, cancel_same_key, reject_same_key]}}
+run_for:
+  name: Run for
+  description: Run a start action immediately and schedule an end action.
+  target: {entity: {}}
+  fields:
+    name: {required: true, selector: {text: {}}}
+    duration: {required: true, selector: {duration: {enable_day: true}}}
+    start_action: {selector: {text: {}}}
+    end_action: {selector: {text: {}}}
+    start_sequence: {selector: {object: {}}}
+    end_sequence: {selector: {object: {}}}
+get:
+  name: Get
+  description: Resolve and return exactly one deferred action.
+  fields:
+    job_id: {selector: {text: {}}}
+    job_key: {selector: {text: {}}}
+    name: {selector: {text: {}}}
+    target_entity: {selector: {entity: {}}}
+    most_recent_pending: {selector: {boolean: {}}}
+list:
+  name: List
+  description: List deferred actions with optional filters.
+  fields:
+    statuses:
+      selector: {select: {multiple: true, options: [pending, paused, executing, completed, cancelled, failed, missed]}}
+    pending_only: {selector: {boolean: {}}}
+    due_before: {selector: {text: {}}}
+    due_after: {selector: {text: {}}}
+    name_query: {selector: {text: {}}}
+    job_key: {selector: {text: {}}}
+    tag: {selector: {text: {}}}
+    source: {selector: {text: {}}}
+    target_entity: {selector: {entity: {}}}
+    include_history: {selector: {boolean: {}}}
+    limit: {selector: {number: {min: 1, max: 1000, mode: box}}}
+    descending: {selector: {boolean: {}}}
+update:
+  name: Update
+  description: Edit mutable fields, optionally using optimistic revision control.
+  fields:
+    job_id: {required: true, selector: {text: {}}}
+    expected_revision: {selector: {number: {min: 1, mode: box}}}
+    name: {selector: {text: {}}}
+    description: {selector: {text: {multiline: true}}}
+    sequence: {selector: {object: {}}}
+    job_key: {selector: {text: {}}}
+    tags: {selector: {text: {multiple: true}}}
+reschedule:
+  name: Reschedule
+  description: Replace a job's execution time.
+  fields:
+    job_id: {required: true, selector: {text: {}}}
+    execute_at: {selector: {text: {}}}
+    delay: {selector: {duration: {enable_day: true}}}
+extend:
+  name: Extend
+  description: Move the execution time by a signed duration.
+  fields:
+    job_id: {required: true, selector: {text: {}}}
+    duration: {required: true, selector: {object: {}}}
+cancel:
+  name: Cancel
+  description: Cancel and retain a pending or paused job.
+  fields: {job_id: {required: true, selector: {text: {}}}}
+delete:
+  name: Delete
+  description: Permanently delete one non-executing job.
+  fields: {job_id: {required: true, selector: {text: {}}}}
+pause:
+  name: Pause
+  description: Exclude a pending job from scheduling.
+  fields: {job_id: {required: true, selector: {text: {}}}}
+resume:
+  name: Resume
+  description: Resume a paused job, optionally at a replacement time.
+  fields:
+    job_id: {required: true, selector: {text: {}}}
+    execute_at: {selector: {text: {}}}
+    delay: {selector: {duration: {enable_day: true}}}
+execute_now:
+  name: Execute now
+  description: Immediately claim and execute one eligible job.
+  fields: {job_id: {required: true, selector: {text: {}}}}
+duplicate:
+  name: Duplicate
+  description: Copy a job to a new ID and execution time.
+  fields:
+    job_id: {required: true, selector: {text: {}}}
+    name: {selector: {text: {}}}
+    execute_at: {selector: {text: {}}}
+    delay: {selector: {duration: {enable_day: true}}}
+cancel_all:
+  name: Cancel matching jobs
+  description: Bulk-cancel matching pending or paused jobs. A selector and confirmation are required.
+  fields:
+    confirm_bulk: {required: true, selector: {boolean: {}}}
+    statuses: {selector: {select: {multiple: true, options: [pending, paused]}}}
+    tag: {selector: {text: {}}}
+    job_key: {selector: {text: {}}}
+delete_history:
+  name: Delete matching history
+  description: Permanently delete selected history. A selector and confirmation are required.
+  fields:
+    confirm_bulk: {required: true, selector: {boolean: {}}}
+    statuses: {selector: {select: {multiple: true, options: [completed, cancelled, failed, missed]}}}
+    before: {selector: {text: {}}}
+cleanup_history:
+  name: Clean up history
+  description: Apply the configured history retention limits now.
