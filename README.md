@@ -238,7 +238,7 @@ action sequences, descriptions, errors and user identifiers.
 
 ## Development
 
-Python uses Ruff and pytest with Home Assistant’s established fixtures. The panel uses Lit,
+Python 3.14 uses Ruff and pytest with Home Assistant’s established fixtures. The panel uses Lit,
 TypeScript, ESLint, Vitest and Vite:
 
 ```text

@@ -2,7 +2,7 @@
 name = "ha-deferred-actions"
 version = "0.1.0"
 description = "Persistent one-off action scheduler for Home Assistant"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 license = "MIT"
 
 [tool.pytest.ini_options]
