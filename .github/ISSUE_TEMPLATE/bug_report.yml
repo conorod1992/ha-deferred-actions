@@ -1,0 +1,26 @@
+name: Bug report
+description: Report a reproducible Deferred Actions problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes: {value: "Please attach redacted diagnostics when possible. Never post secrets or private action data."}
+  - type: input
+    id: ha_version
+    attributes: {label: Home Assistant version}
+    validations: {required: true}
+  - type: input
+    id: integration_version
+    attributes: {label: Deferred Actions version}
+    validations: {required: true}
+  - type: textarea
+    id: description
+    attributes: {label: "What happened?"}
+    validations: {required: true}
+  - type: textarea
+    id: reproduce
+    attributes: {label: Steps to reproduce}
+    validations: {required: true}
+  - type: textarea
+    id: logs
+    attributes: {label: Relevant redacted logs}
