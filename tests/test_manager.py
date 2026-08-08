@@ -12,6 +12,7 @@ from custom_components.deferred_actions.models import (
     InvalidTimeError,
     JobStatus,
     RevisionConflictError,
+    UnsafeActionError,
     utc_now,
 )
 
@@ -25,9 +26,15 @@ async def manager(hass, mock_storage):
 
 
 async def create(manager, **kwargs):
-    with patch(
-        "custom_components.deferred_actions.manager.async_validate_sequence",
-        AsyncMock(side_effect=lambda _hass, value: value),
+    with (
+        patch(
+            "custom_components.deferred_actions.manager.async_validate_sequence",
+            AsyncMock(side_effect=lambda _hass, value: value),
+        ),
+        patch(
+            "custom_components.deferred_actions.manager.async_validate_conditions",
+            AsyncMock(side_effect=lambda _hass, value: value or []),
+        ),
     ):
         return await manager.async_create(
             name=kwargs.pop("name", "Test"),
@@ -132,3 +139,249 @@ async def test_list_filters_and_json_data(manager) -> None:
     result = manager.async_list(name_query="off", tag="heat", target_entity="switch.office")
     assert result["count"] == 1
     assert isinstance(result["jobs"][0]["execute_at"], str)
+
+
+@pytest.mark.parametrize(
+    ("mode", "status", "event"),
+    [
+        ("skip", JobStatus.SKIPPED, "deferred_actions_job_skipped"),
+        ("cancel", JobStatus.CANCELLED, "deferred_actions_job_cancelled"),
+        ("fail", JobStatus.FAILED, "deferred_actions_job_failed"),
+    ],
+)
+async def test_false_condition_behavior(manager, hass, mode, status, event) -> None:
+    job = await create(
+        manager,
+        conditions=[{"condition": "state", "entity_id": "switch.office", "state": "on"}],
+        condition_failure=mode,
+    )
+    listener = AsyncMock()
+    hass.bus.async_listen(event, listener)
+    execute = AsyncMock()
+    with (
+        patch(
+            "custom_components.deferred_actions.manager.async_conditions_pass",
+            AsyncMock(return_value=False),
+        ),
+        patch("custom_components.deferred_actions.manager.async_execute_job", execute),
+    ):
+        result = await manager.async_execute_now(job["id"])
+        await hass.async_block_till_done()
+    assert result["status"] == status.value
+    execute.assert_not_awaited()
+    assert listener.await_count == 1
+
+
+async def test_true_condition_executes_and_execute_now_rechecks(manager) -> None:
+    job = await create(
+        manager, conditions=[{"condition": "state", "entity_id": "switch.office", "state": "on"}]
+    )
+    condition_check = AsyncMock(return_value=True)
+    execute = AsyncMock()
+    with (
+        patch("custom_components.deferred_actions.manager.async_conditions_pass", condition_check),
+        patch("custom_components.deferred_actions.manager.async_execute_job", execute),
+    ):
+        result = await manager.async_execute_now(job["id"])
+    assert result["status"] == "completed"
+    condition_check.assert_awaited_once()
+    execute.assert_awaited_once()
+
+
+async def test_overdue_restart_execution_rechecks_conditions(manager) -> None:
+    manager.update_options({"overdue_policy": "execute"})
+    job = await create(
+        manager,
+        conditions=[{"condition": "state", "entity_id": "switch.office", "state": "on"}],
+    )
+    manager.jobs[job["id"]].execute_at = utc_now() - timedelta(minutes=1)
+    execute = AsyncMock()
+    with (
+        patch(
+            "custom_components.deferred_actions.manager.async_conditions_pass",
+            AsyncMock(return_value=False),
+        ),
+        patch("custom_components.deferred_actions.manager.async_execute_job", execute),
+    ):
+        await manager._async_recover_overdue()
+    assert manager.jobs[job["id"]].status == JobStatus.SKIPPED
+    execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("global_policy", "job_policy", "expected"),
+    [("skip", "execute", JobStatus.COMPLETED), ("execute", "skip", JobStatus.MISSED)],
+)
+async def test_job_overdue_policy_overrides_global(
+    manager, global_policy, job_policy, expected
+) -> None:
+    manager.update_options({"overdue_policy": global_policy})
+    job = await create(manager, overdue_policy=job_policy)
+    manager.jobs[job["id"]].execute_at = utc_now() - timedelta(hours=1)
+    with (
+        patch(
+            "custom_components.deferred_actions.manager.async_conditions_pass",
+            AsyncMock(return_value=True),
+        ),
+        patch("custom_components.deferred_actions.manager.async_execute_job", AsyncMock()),
+    ):
+        await manager._async_recover_overdue()
+    assert manager.jobs[job["id"]].status == expected
+
+
+async def test_job_and_inherited_overdue_grace(manager) -> None:
+    manager.update_options({"overdue_policy": "execute_within_grace", "overdue_grace_minutes": 10})
+    inherited = await create(manager)
+    custom = await create(
+        manager, overdue_policy="execute_within_grace", overdue_grace={"minutes": 2}
+    )
+    manager.jobs[inherited["id"]].execute_at = utc_now() - timedelta(minutes=5)
+    manager.jobs[custom["id"]].execute_at = utc_now() - timedelta(minutes=5)
+    with (
+        patch(
+            "custom_components.deferred_actions.manager.async_conditions_pass",
+            AsyncMock(return_value=True),
+        ),
+        patch("custom_components.deferred_actions.manager.async_execute_job", AsyncMock()),
+    ):
+        await manager._async_recover_overdue()
+    assert manager.jobs[inherited["id"]].status == JobStatus.COMPLETED
+    assert manager.jobs[custom["id"]].status == JobStatus.MISSED
+
+
+async def test_invalid_overdue_policy_and_grace(manager) -> None:
+    with pytest.raises(InvalidTimeError):
+        await create(manager, overdue_policy="later")
+    with pytest.raises(InvalidTimeError):
+        await create(manager, overdue_grace={"minutes": -1})
+
+
+async def test_valid_until_validation_and_public_times(manager) -> None:
+    execute_at = utc_now() + timedelta(hours=1)
+    result = await create(
+        manager,
+        delay=None,
+        execute_at=execute_at.isoformat(),
+        valid_until=(execute_at + timedelta(minutes=5)).isoformat(),
+    )
+    assert result["valid_until"].endswith("Z")
+    assert result["valid_until_local"]
+    with pytest.raises(InvalidTimeError):
+        await create(manager, valid_until="2026-08-09T09:30:00")
+    with pytest.raises(InvalidTimeError):
+        await create(manager, valid_until=(utc_now() + timedelta(minutes=10)).isoformat())
+
+
+async def test_expiry_wins_over_due_and_overdue_execution(manager) -> None:
+    job = await create(manager, overdue_policy="execute")
+    stored = manager.jobs[job["id"]]
+    stored.execute_at = utc_now() - timedelta(minutes=2)
+    stored.valid_until = utc_now() - timedelta(minutes=1)
+    execute = AsyncMock()
+    with patch("custom_components.deferred_actions.manager.async_execute_job", execute):
+        await manager._async_recover_overdue()
+    assert stored.status == JobStatus.EXPIRED
+    execute.assert_not_awaited()
+    with pytest.raises(InvalidStatusError):
+        await manager.async_execute_now(job["id"])
+
+
+async def test_snooze_durations_revision_status_and_expiry(manager) -> None:
+    for minutes in (5, 15, 30, 60):
+        job = await create(manager)
+        before = datetime.fromisoformat(job["execute_at"].replace("Z", "+00:00"))
+        snoozed = await manager.async_snooze(job["id"], {"minutes": minutes})
+        after = datetime.fromisoformat(snoozed["execute_at"].replace("Z", "+00:00"))
+        assert after - before == timedelta(minutes=minutes)
+        assert snoozed["revision"] == job["revision"] + 1
+    paused = await create(manager)
+    await manager.async_pause(paused["id"])
+    with pytest.raises(InvalidStatusError):
+        await manager.async_snooze(paused["id"], {"minutes": 5})
+    expiring = await create(manager)
+    manager.jobs[expiring["id"]].valid_until = manager.jobs[expiring["id"]].execute_at + timedelta(
+        minutes=5
+    )
+    with pytest.raises(InvalidTimeError):
+        await manager.async_snooze(expiring["id"], {"minutes": 5})
+
+
+async def test_discovered_targets_merge_and_search(manager) -> None:
+    job = await create(
+        manager,
+        sequence=[
+            {
+                "choose": [
+                    {
+                        "sequence": [
+                            {
+                                "action": "light.turn_off",
+                                "target": {"entity_id": ["light.one", "light.two"]},
+                            }
+                        ]
+                    }
+                ]
+            }
+        ],
+        target_entities=["switch.hint", "light.one"],
+        conditions=[{"condition": "state", "entity_id": "binary_sensor.ready", "state": "on"}],
+    )
+    assert job["target_entities"] == ["light.one", "light.two", "switch.hint"]
+    assert manager.resolve(target_entity="binary_sensor.ready").id == job["id"]
+
+
+async def test_safe_create_allow_block_templates_and_attribution(manager) -> None:
+    with (
+        patch(
+            "custom_components.deferred_actions.manager.async_validate_sequence",
+            AsyncMock(side_effect=lambda _hass, value: value),
+        ),
+        patch(
+            "custom_components.deferred_actions.manager.async_validate_conditions",
+            AsyncMock(side_effect=lambda _hass, value: value or []),
+        ),
+    ):
+        job = await manager.async_create_safe(
+            name="Office light",
+            action="light.turn_off",
+            target_entities=["light.office"],
+            delay={"minutes": 5},
+            data={"transition": 1},
+            attribution={"source": "voice"},
+        )
+        assert job["source"] == "safe_service"
+        assert job["attribution"]["interface"] == "create_safe"
+        manager.update_options({"safe_allowed_domains": ["light"], "safe_blocked_actions": []})
+        with pytest.raises(UnsafeActionError, match="not enabled"):
+            await manager.async_create_safe(
+                name="Switch",
+                action="switch.turn_off",
+                target_entities=["switch.one"],
+                delay={"minutes": 5},
+            )
+        manager.update_options(
+            {"safe_allowed_domains": ["light"], "safe_blocked_actions": ["light.turn_off"]}
+        )
+        with pytest.raises(UnsafeActionError, match="explicitly blocked"):
+            await manager.async_create_safe(
+                name="Blocked",
+                action="light.turn_off",
+                target_entities=["light.one"],
+                delay={"minutes": 5},
+            )
+        with pytest.raises(UnsafeActionError, match="templates"):
+            await manager.async_create_safe(
+                name="Template",
+                action="light.turn_on",
+                target_entities=["light.one"],
+                data={"brightness": "{{ 1 }}"},
+                delay={"minutes": 5},
+            )
+        with pytest.raises(UnsafeActionError, match="fields are not accepted"):
+            await manager.async_create_safe(
+                name="Sequence",
+                action="light.turn_on",
+                target_entities=["light.one"],
+                sequence=[],
+                delay={"minutes": 5},
+            )

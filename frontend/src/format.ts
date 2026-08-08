@@ -14,3 +14,17 @@ export function relativeTime(iso: string, now = Date.now()): string {
 export const localDate = (iso: string): string => new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium", timeStyle: "short",
 }).format(new Date(iso));
+
+export const snoozePresets = [5, 15, 30, 60] as const;
+
+export const isHistoryStatus = (status: JobStatus): boolean =>
+  ["completed", "cancelled", "missed", "skipped", "expired"].includes(status);
+
+export const effectiveOverdueLabel = (job: DeferredJob): string => {
+  const inherited = job.overdue_policy ? "job override" : "inherited";
+  if (job.effective_overdue_policy === "execute_within_grace") {
+    return `Execute within ${job.effective_overdue_grace_minutes} minutes (${inherited})`;
+  }
+  return `${job.effective_overdue_policy} (${inherited})`;
+};
+import type { DeferredJob, JobStatus } from "./types";

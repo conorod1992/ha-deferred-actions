@@ -15,10 +15,16 @@
           "history_retention_days": "History retention (days)",
           "maximum_history_records": "Maximum history records",
           "default_conflict_mode": "Default job-key conflict mode",
-          "frontend_panel_enabled": "Enable sidebar panel"
+          "frontend_panel_enabled": "Enable sidebar panel",
+          "safe_allowed_domains": "Domains enabled for restricted scheduling",
+          "safe_blocked_actions": "Actions always blocked from restricted scheduling"
         }
       }
     }
   },
-  "entity": {"sensor": {"deferred_actions": {"name": "Deferred Actions"}}}
+  "entity": {"sensor": {"deferred_actions": {"name": "Deferred Actions"}}},
+  "exceptions": {
+    "invalid_condition": {"message": "The execution conditions are invalid."},
+    "unsafe_action": {"message": "The requested action is not allowed by restricted scheduling."}
+  }
 }

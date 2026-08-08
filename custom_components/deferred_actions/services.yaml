@@ -11,6 +11,32 @@ create:
     tags: {selector: {text: {multiple: true}}}
     conflict_mode:
       selector: {select: {options: [keep_all, replace_same_key, cancel_same_key, reject_same_key]}}
+    conditions: {description: Home Assistant conditions evaluated immediately before execution., selector: {object: {}}}
+    condition_failure:
+      default: skip
+      selector: {select: {options: [skip, cancel, fail]}}
+    overdue_policy:
+      selector: {select: {options: [execute, skip, execute_within_grace]}}
+    overdue_grace: {description: Optional grace duration for execute_within_grace., selector: {duration: {enable_day: true}}}
+    valid_until: {description: Offset-aware absolute validity cutoff., selector: {text: {}}}
+create_safe:
+  name: Create (restricted)
+  description: Schedule one conservatively allowed literal action. This is not a complete permission sandbox.
+  fields:
+    name: {required: true, selector: {text: {}}}
+    action: {required: true, description: Literal service/action such as light.turn_off., selector: {text: {}}}
+    target_entities: {required: true, selector: {entity: {multiple: true}}}
+    data: {description: Limited non-template action data., selector: {object: {}}}
+    execute_at: {description: Offset-aware ISO 8601 date-time., selector: {text: {}}}
+    delay: {selector: {duration: {enable_day: true}}}
+    description: {selector: {text: {multiline: true}}}
+    job_key: {selector: {text: {}}}
+    tags: {selector: {text: {multiple: true}}}
+    conditions: {description: Optional simple literal state or numeric-state conditions., selector: {object: {}}}
+    condition_failure: {default: skip, selector: {select: {options: [skip, cancel, fail]}}}
+    overdue_policy: {selector: {select: {options: [execute, skip, execute_within_grace]}}}
+    overdue_grace: {selector: {duration: {enable_day: true}}}
+    valid_until: {description: Offset-aware absolute validity cutoff., selector: {text: {}}}
 run_for:
   name: Run for
   description: Run a start action immediately and schedule an end action.
@@ -36,7 +62,7 @@ list:
   description: List deferred actions with optional filters.
   fields:
     statuses:
-      selector: {select: {multiple: true, options: [pending, paused, executing, completed, cancelled, failed, missed]}}
+      selector: {select: {multiple: true, options: [pending, paused, executing, completed, cancelled, failed, missed, skipped, expired]}}
     pending_only: {selector: {boolean: {}}}
     due_before: {selector: {text: {}}}
     due_after: {selector: {text: {}}}
@@ -59,6 +85,12 @@ update:
     sequence: {selector: {object: {}}}
     job_key: {selector: {text: {}}}
     tags: {selector: {text: {multiple: true}}}
+    target_entities: {selector: {entity: {multiple: true}}}
+    conditions: {selector: {object: {}}}
+    condition_failure: {selector: {select: {options: [skip, cancel, fail]}}}
+    overdue_policy: {selector: {select: {options: [execute, skip, execute_within_grace]}}}
+    overdue_grace: {selector: {duration: {enable_day: true}}}
+    valid_until: {selector: {text: {}}}
 reschedule:
   name: Reschedule
   description: Replace a job's execution time.
@@ -72,6 +104,12 @@ extend:
   fields:
     job_id: {required: true, selector: {text: {}}}
     duration: {required: true, selector: {object: {}}}
+snooze:
+  name: Snooze
+  description: Move a pending job later relative to its current scheduled time.
+  fields:
+    job_id: {required: true, selector: {text: {}}}
+    duration: {required: true, selector: {duration: {enable_day: true}}}
 cancel:
   name: Cancel
   description: Cancel and retain a pending or paused job.
@@ -116,7 +154,7 @@ delete_history:
   description: Permanently delete selected history. A selector and confirmation are required.
   fields:
     confirm_bulk: {required: true, selector: {boolean: {}}}
-    statuses: {selector: {select: {multiple: true, options: [completed, cancelled, failed, missed]}}}
+    statuses: {selector: {select: {multiple: true, options: [completed, cancelled, failed, missed, skipped, expired]}}}
     before: {selector: {text: {}}}
 cleanup_history:
   name: Clean up history

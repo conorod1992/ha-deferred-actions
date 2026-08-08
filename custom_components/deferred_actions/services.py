@@ -13,12 +13,14 @@ from .models import DeferredActionsError
 
 SERVICE_NAMES = (
     "create",
+    "create_safe",
     "run_for",
     "get",
     "list",
     "update",
     "reschedule",
     "extend",
+    "snooze",
     "cancel",
     "delete",
     "pause",
@@ -29,6 +31,47 @@ SERVICE_NAMES = (
     "delete_history",
     "cleanup_history",
 )
+
+_CREATE_FIELDS = {
+    vol.Required("name"): str,
+    vol.Required("sequence"): list,
+    vol.Optional("execute_at"): vol.Any(str, object),
+    vol.Optional("delay"): dict,
+    vol.Optional("conditions"): list,
+    vol.Optional("condition_failure"): vol.In(("skip", "cancel", "fail")),
+    vol.Optional("overdue_policy"): vol.In(("execute", "skip", "execute_within_grace")),
+    vol.Optional("overdue_grace"): dict,
+    vol.Optional("valid_until"): vol.Any(str, object),
+}
+
+SERVICE_SCHEMAS = {
+    "create": vol.Schema(_CREATE_FIELDS, extra=vol.ALLOW_EXTRA),
+    "create_safe": vol.Schema(
+        {
+            vol.Required("name"): str,
+            vol.Exclusive("action", "safe_action"): str,
+            vol.Exclusive("service", "safe_action"): str,
+            vol.Required("target_entities"): vol.Any(str, [str]),
+            vol.Optional("data"): dict,
+            vol.Optional("execute_at"): vol.Any(str, object),
+            vol.Optional("delay"): dict,
+            vol.Optional("description"): str,
+            vol.Optional("job_key"): str,
+            vol.Optional("tags"): [str],
+            vol.Optional("conflict_mode"): str,
+            vol.Optional("conditions"): list,
+            vol.Optional("condition_failure"): vol.In(("skip", "cancel", "fail")),
+            vol.Optional("overdue_policy"): vol.In(("execute", "skip", "execute_within_grace")),
+            vol.Optional("overdue_grace"): dict,
+            vol.Optional("valid_until"): vol.Any(str, object),
+        },
+        extra=vol.PREVENT_EXTRA,
+    ),
+    "snooze": vol.Schema(
+        {vol.Required("job_id"): str, vol.Required("duration"): dict},
+        extra=vol.PREVENT_EXTRA,
+    ),
+}
 
 
 def _manager(hass: HomeAssistant):
@@ -113,6 +156,13 @@ async def _async_handle_service(hass: HomeAssistant, call: ServiceCall):
                     attribution=_attribution(call, "service"),
                 )
             }
+        if operation == "create_safe":
+            return {
+                "job": await manager.async_create_safe(
+                    **data,
+                    attribution=_attribution(call, "safe_service"),
+                )
+            }
         if operation == "run_for":
             return {
                 "job": await async_run_for(
@@ -134,6 +184,8 @@ async def _async_handle_service(hass: HomeAssistant, call: ServiceCall):
             return {"job": await manager.async_reschedule(job_id, **data)}
         if operation == "extend":
             return {"job": await manager.async_extend(data["job_id"], data["duration"])}
+        if operation == "snooze":
+            return {"job": await manager.async_snooze(data["job_id"], data["duration"])}
         if operation in {"cancel", "delete", "pause", "execute_now"}:
             return {"job": await getattr(manager, f"async_{operation}")(data["job_id"])}
         if operation == "resume":
@@ -152,6 +204,8 @@ async def _async_handle_service(hass: HomeAssistant, call: ServiceCall):
         raise ServiceValidationError(
             str(err), translation_domain=DOMAIN, translation_key=err.code
         ) from err
+    except (KeyError, TypeError, ValueError) as err:
+        raise ServiceValidationError(str(err)) from err
     raise ServiceValidationError(f"Unknown Deferred Actions operation: {operation}")
 
 
@@ -163,7 +217,7 @@ async def async_register_services(hass: HomeAssistant) -> None:
                 DOMAIN,
                 name,
                 lambda call, _hass=hass: _async_handle_service(_hass, call),
-                schema=vol.Schema({}, extra=vol.ALLOW_EXTRA),
+                schema=SERVICE_SCHEMAS.get(name, vol.Schema({}, extra=vol.ALLOW_EXTRA)),
                 supports_response=SupportsResponse.ONLY,
             )
 

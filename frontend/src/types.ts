@@ -5,7 +5,7 @@ export interface HomeAssistant {
   };
 }
 
-export type JobStatus = "pending" | "paused" | "executing" | "completed" | "cancelled" | "failed" | "missed";
+export type JobStatus = "pending" | "paused" | "executing" | "completed" | "cancelled" | "failed" | "missed" | "skipped" | "expired";
 
 export interface DeferredJob {
   id: string;
@@ -24,6 +24,16 @@ export interface DeferredJob {
   tags: string[];
   source: string;
   target_entities: string[];
+  condition_entities: string[];
+  conditions: Record<string, unknown>[];
+  has_conditions: boolean;
+  condition_failure: "skip" | "cancel" | "fail";
+  overdue_policy?: "execute" | "skip" | "execute_within_grace";
+  overdue_grace?: Record<string, number>;
+  effective_overdue_policy: "execute" | "skip" | "execute_within_grace";
+  effective_overdue_grace_minutes: number;
+  valid_until?: string;
+  valid_until_local?: string;
   attribution: Record<string, unknown>;
   linkage: Record<string, unknown>;
   last_error?: string;

@@ -16,10 +16,13 @@ call its normal actions from their own sentence-triggered automations.
 
 - Absolute, timezone-aware dates or relative delays, normalized to UTC
 - Full Home Assistant sequences: templates, choose, repeat, parallel, waits, delays and more
+- Optional execution-time conditions with skip, cancel or fail behavior
+- Per-job overdue recovery overrides and absolute `valid_until` expiry cutoffs
+- Automatic literal entity target discovery across nested action structures
 - Persistent active queue and configurable retained history
 - One Home Assistant UTC callback for the earliest pending job; no sleeping tasks
 - Safe status claims that prevent execute-now/automatic-execution races
-- Create, get, list, update, reschedule, extend, pause, resume, cancel, delete, duplicate and execute-now
+- Create, restricted create, get, list, update, reschedule, extend, snooze, pause, resume, cancel, delete, duplicate and execute-now
 - Explicitly confirmed bulk cancellation and history deletion
 - Semantic job keys with keep, replace, cancel or reject conflict behavior
 - `run_for` for immediate start plus deferred end actions
@@ -104,6 +107,41 @@ data:
 Absolute dates must include an explicit UTC offset. Naive local timestamps are rejected,
 which avoids ambiguity during daylight-saving transitions.
 
+### Conditions, expiry and per-job overdue behavior
+
+```yaml
+action: deferred_actions.create
+data:
+  name: Turn off office heater if it is still on
+  delay: {minutes: 30}
+  valid_until: "2026-08-09T09:30:00+01:00"
+  overdue_policy: execute_within_grace
+  overdue_grace: {minutes: 5}
+  conditions:
+    - condition: state
+      entity_id: switch.office_heater
+      state: "on"
+  condition_failure: skip
+  sequence:
+    - action: switch.turn_off
+      target: {entity_id: switch.office_heater}
+```
+
+Conditions use normal Home Assistant syntax and are validated when saved, then validated
+and evaluated again immediately before execution. If false, `skip` produces `skipped`,
+`cancel` produces `cancelled`, and `fail` produces `failed`. Existing jobs have no conditions
+and default to `skip`.
+
+`valid_until` is an offset-aware absolute statement of user intent and must be later than
+`execute_at`. A job that has not begun by the cutoff becomes `expired` and can never be
+executed. Per-job `overdue_policy` may be `execute`, `skip`, or `execute_within_grace`;
+omitting it inherits the integration option. A supplied `overdue_grace` overrides the global
+grace.
+
+Precedence is: the job must be eligible; expiry wins; restart/reload recovery applies the
+effective overdue policy; conditions are re-evaluated immediately before the sequence; then
+the sequence runs.
+
 ### Extend, list and cancel
 
 ```yaml
@@ -113,6 +151,42 @@ data:
   duration:
     minutes: 15
 ```
+
+For the common postpone-only case, `snooze` requires a positive duration and operates only
+on pending jobs. It moves the existing scheduled time, increments the revision, and refuses
+to move the job to or beyond `valid_until`:
+
+```yaml
+action: deferred_actions.snooze
+data:
+  job_id: "JOB_ID"
+  duration: {minutes: 15}
+```
+
+Literal `entity_id` values are discovered automatically from direct and nested `choose`,
+`repeat`, `parallel`, `if`/`then`/`else`, and sequence structures. Templates are never
+rendered for discovery. Explicit `target_entities` remain useful for dynamic actions and are
+merged with discovered targets in deterministic order.
+
+### Restricted scheduling for voice or LLM callers
+
+```yaml
+action: deferred_actions.create_safe
+data:
+  name: Turn off the office light
+  delay: {minutes: 20}
+  action: light.turn_off
+  target_entities: [light.office]
+  data: {transition: 2}
+```
+
+`create_safe` accepts one literal action instead of an arbitrary sequence. The domain must
+be enabled in integration options, the operation must be in the conservative built-in action
+set, and the full action must not be explicitly blocked. Targets must be literal IDs in that
+domain. Templates, arbitrary sequences, nested scripts, unsupported data keys, and complex
+conditions are rejected. Optional conditions are limited to literal `state` and
+`numeric_state` conditions. These records use source `safe_service` and enter the same
+persistent scheduler as every other job.
 
 ```yaml
 action: deferred_actions.list
@@ -151,7 +225,7 @@ never means everything.
 
 The integration registers:
 
-`create`, `run_for`, `get`, `list`, `update`, `reschedule`, `extend`, `cancel`, `delete`,
+`create`, `create_safe`, `run_for`, `get`, `list`, `update`, `reschedule`, `extend`, `snooze`, `cancel`, `delete`,
 `pause`, `resume`, `execute_now`, `duplicate`, `cancel_all`, `delete_history`, and
 `cleanup_history` under the `deferred_actions` domain.
 
@@ -173,6 +247,8 @@ history_retention_days: 7
 maximum_history_records: 500
 default_conflict_mode: keep_all
 frontend_panel_enabled: true
+safe_allowed_domains: [light, switch, fan, media_player]
+safe_blocked_actions: []
 ```
 
 `execute` runs every overdue pending job at startup. `skip` marks each overdue job
@@ -180,14 +256,20 @@ frontend_panel_enabled: true
 older jobs missed. Paused jobs stay paused; the same policy is applied when one is resumed
 without a replacement time.
 
+Safe-domain access is denied outside `safe_allowed_domains`. An entry in
+`safe_blocked_actions` always wins. Enabling a domain does not enable every operation: the
+integration's conservative built-in action set remains an additional gate.
+
 ## States and events
 
-Jobs use `pending`, `paused`, `executing`, `completed`, `cancelled`, `failed`, and `missed`.
+Jobs use `pending`, `paused`, `executing`, `completed`, `cancelled`, `failed`, `missed`,
+`skipped`, and `expired`.
 An executing job cannot be edited, cancelled or deleted. History states cannot be edited
 back to pending; duplicate or execute an eligible failed/missed record instead.
 
 Home Assistant fires `deferred_actions_job_created`, `_updated`, `_started`, `_completed`,
-`_failed`, `_cancelled`, `_deleted`, `_missed`, `_paused`, and `_resumed`. Event data is
+`_failed`, `_cancelled`, `_deleted`, `_missed`, `_skipped`, `_expired`, `_paused`, and
+`_resumed`. Event data is
 concise and excludes the action sequence.
 
 `sensor.deferred_actions` has the pending count as its state and only summary attributes:
@@ -206,6 +288,11 @@ to schedule any Home Assistant action sequence those interfaces can submit.
 
 Do not expose unrestricted scheduling actions to untrusted users or external clients.
 
+`create_safe` materially narrows what a trusted-but-restricted caller can schedule, but it is
+not a complete Home Assistant permission sandbox. Administrators must still review allowed
+domains, blocked actions, caller access, Home Assistant service semantics, and downstream
+automations.
+
 Any automation, script or external caller remains responsible for deciding which actions it
 may perform immediately or defer.
 
@@ -217,7 +304,7 @@ not be treated as a complete security boundary. Full conversation text is never 
 Jobs are stored with Home Assistant’s versioned storage helper. Important changes are
 coalesced and flushed on unload. Invalid records are quarantined from the live queue and
 reported as a count in diagnostics instead of preventing setup. Completed/cancelled/failed/
-missed jobs are cleaned at startup, every six hours, or on demand.
+missed/skipped/expired jobs are cleaned at startup, every six hours, or on demand.
 
 Routine UI summaries never render templates or include service data. Diagnostics redact
 action sequences, descriptions, errors and user identifiers.
