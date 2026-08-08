@@ -17,10 +17,13 @@ from .const import (
     CONF_OVERDUE_GRACE_MINUTES,
     CONF_OVERDUE_POLICY,
     CONF_PANEL_ENABLED,
+    CONF_SAFE_ALLOWED_DOMAINS,
+    CONF_SAFE_BLOCKED_ACTIONS,
     CONFLICT_MODES,
     DEFAULT_OPTIONS,
     DOMAIN,
     OVERDUE_POLICIES,
+    SAFE_ACTIONS,
 )
 
 
@@ -73,6 +76,14 @@ class DeferredActionsOptionsFlow(config_entries.OptionsFlow):
                     selector.SelectSelectorConfig(options=list(CONFLICT_MODES))
                 ),
                 vol.Required(CONF_PANEL_ENABLED, default=values[CONF_PANEL_ENABLED]): bool,
+                vol.Required(
+                    CONF_SAFE_ALLOWED_DOMAINS, default=values[CONF_SAFE_ALLOWED_DOMAINS]
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(options=list(SAFE_ACTIONS), multiple=True)
+                ),
+                vol.Required(
+                    CONF_SAFE_BLOCKED_ACTIONS, default=values[CONF_SAFE_BLOCKED_ACTIONS]
+                ): selector.TextSelector(selector.TextSelectorConfig(multiple=True)),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)

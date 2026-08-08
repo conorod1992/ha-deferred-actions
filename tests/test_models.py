@@ -9,6 +9,8 @@ from custom_components.deferred_actions.models import (
     InvalidTimeError,
     JobStatus,
     ensure_utc,
+    extract_entity_ids,
+    merge_entity_ids,
     summarize_sequence,
 )
 
@@ -62,3 +64,86 @@ def test_naive_time_rejected() -> None:
 )
 def test_safe_action_summary(sequence, expected) -> None:
     assert summarize_sequence(sequence) == expected
+
+
+def test_old_storage_record_gets_new_defaults() -> None:
+    now = datetime(2026, 8, 2, 18, tzinfo=UTC)
+    record = DeferredJob(
+        id="old",
+        name="Old",
+        execute_at=now,
+        sequence=[{"action": "light.turn_off"}],
+        created_at=now,
+        modified_at=now,
+    ).to_storage()
+    for key in (
+        "conditions",
+        "condition_failure",
+        "condition_entities",
+        "explicit_target_entities",
+        "overdue_policy",
+        "overdue_grace",
+        "valid_until",
+        "terminal_reason",
+    ):
+        record.pop(key)
+    restored = DeferredJob.from_storage(record)
+    assert restored.conditions == []
+    assert restored.condition_failure == "skip"
+    assert restored.overdue_policy is None
+    assert restored.valid_until is None
+    assert restored.terminal_reason is None
+
+
+def test_old_normal_terminal_error_migrates_to_reason() -> None:
+    now = datetime(2026, 8, 2, 18, tzinfo=UTC)
+    record = DeferredJob(
+        id="old-expired",
+        name="Old expired job",
+        execute_at=now,
+        sequence=[{"action": "light.turn_off"}],
+        created_at=now,
+        modified_at=now,
+        status=JobStatus.EXPIRED,
+        last_error="Validity cutoff passed before execution began",
+    ).to_storage()
+    record.pop("terminal_reason")
+    restored = DeferredJob.from_storage(record)
+    assert restored.last_error is None
+    assert restored.terminal_reason == "Validity cutoff passed before execution began"
+
+
+def test_extract_nested_literal_entity_targets() -> None:
+    sequence = [
+        {"action": "light.turn_off", "target": {"entity_id": ["light.one", "light.two"]}},
+        {
+            "choose": [
+                {
+                    "conditions": [],
+                    "sequence": [
+                        {"action": "switch.turn_off", "target": {"entity_id": "switch.one"}}
+                    ],
+                }
+            ]
+        },
+        {
+            "repeat": {
+                "sequence": [
+                    {"parallel": [{"action": "fan.turn_off", "target": {"entity_id": "fan.one"}}]}
+                ]
+            }
+        },
+        {
+            "if": [],
+            "then": [{"action": "light.turn_on", "target": {"entity_id": "light.one"}}],
+            "else": [{"target": {"entity_id": "{{ dynamic }}"}}],
+        },
+    ]
+    assert extract_entity_ids(sequence) == ["light.one", "light.two", "switch.one", "fan.one"]
+    assert merge_entity_ids(extract_entity_ids(sequence), ["cover.hint", "light.one"]) == [
+        "light.one",
+        "light.two",
+        "switch.one",
+        "fan.one",
+        "cover.hint",
+    ]

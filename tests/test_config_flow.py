@@ -45,6 +45,8 @@ async def test_options_flow(hass) -> None:
             "maximum_history_records": 200,
             "default_conflict_mode": "keep_all",
             "frontend_panel_enabled": False,
+            "safe_allowed_domains": ["light", "switch"],
+            "safe_blocked_actions": ["light.toggle"],
         },
     )
     assert result["type"] == "create_entry"

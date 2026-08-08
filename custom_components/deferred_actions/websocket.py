@@ -18,6 +18,7 @@ COMMANDS = (
     "update",
     "reschedule",
     "extend",
+    "snooze",
     "cancel",
     "delete",
     "pause",
@@ -43,6 +44,8 @@ async def _dispatch(manager, operation: str, data: dict[str, Any]):
         return {"job": await getattr(manager, f"async_{operation}")(job_id, **data)}
     if operation == "extend":
         return {"job": await manager.async_extend(data["job_id"], data["duration"])}
+    if operation == "snooze":
+        return {"job": await manager.async_snooze(data["job_id"], data["duration"])}
     return {"job": await getattr(manager, f"async_{operation}")(data["job_id"])}
 
 

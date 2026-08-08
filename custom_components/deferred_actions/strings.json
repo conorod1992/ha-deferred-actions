@@ -15,7 +15,9 @@
           "history_retention_days": "History retention (days)",
           "maximum_history_records": "Maximum history records",
           "default_conflict_mode": "Default job-key conflict mode",
-          "frontend_panel_enabled": "Enable sidebar panel"
+          "frontend_panel_enabled": "Enable sidebar panel",
+          "safe_allowed_domains": "Domains enabled for restricted scheduling",
+          "safe_blocked_actions": "Actions always blocked from restricted scheduling"
         }
       }
     }
@@ -28,6 +30,8 @@
     "invalid_time": {"message": "The requested time is invalid."},
     "invalid_status": {"message": "The operation is not valid for this job status."},
     "revision_conflict": {"message": "The job changed after it was loaded."},
-    "bulk_confirmation_required": {"message": "Bulk confirmation and a selector are required."}
+    "bulk_confirmation_required": {"message": "Bulk confirmation and a selector are required."},
+    "invalid_condition": {"message": "The execution conditions are invalid."},
+    "unsafe_action": {"message": "The requested action is not allowed by restricted scheduling."}
   }
 }

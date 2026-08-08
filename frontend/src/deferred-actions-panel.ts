@@ -2,13 +2,13 @@ import { LitElement, css, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { dump, load } from "js-yaml";
 import { createJob, listJobs, operateJob, subscribeJobs, updateJob } from "./api";
-import { localDate, relativeTime } from "./format";
+import { effectiveOverdueLabel, isHistoryStatus, localDate, relativeTime, resolutionHints, snoozePresets } from "./format";
 import type { DeferredJob, HomeAssistant, PushEvent, QueueSummary } from "./types";
 
 type Tab = "Pending" | "Paused" | "Failed" | "History" | "All";
 type EditorMode = "simple" | "advanced";
 type ScheduleMode = "delay" | "absolute";
-type QuickDialog = { job: DeferredJob; kind: "reschedule" | "extend" | "duplicate" };
+type QuickDialog = { job: DeferredJob; kind: "reschedule" | "extend" | "snooze" | "duplicate" };
 
 @customElement("deferred-actions-panel")
 export class DeferredActionsPanel extends LitElement {
@@ -61,6 +61,7 @@ export class DeferredActionsPanel extends LitElement {
     else if (event.job) {
       const index = this.jobs.findIndex((job) => job.id === event.job?.id);
       this.jobs = index < 0 ? [...this.jobs, event.job] : this.jobs.map((job) => job.id === event.job?.id ? event.job! : job);
+      if (this.selected?.id === event.job.id) this.selected = event.job;
     }
     this.recalculate();
   }
@@ -77,12 +78,11 @@ export class DeferredActionsPanel extends LitElement {
   }
 
   private visibleJobs(): DeferredJob[] {
-    const history = new Set(["completed", "cancelled", "missed"]);
     return this.jobs.filter((job) => this.tab === "All"
       || (this.tab === "Pending" && ["pending", "executing"].includes(job.status))
       || (this.tab === "Paused" && job.status === "paused")
       || (this.tab === "Failed" && job.status === "failed")
-      || (this.tab === "History" && history.has(job.status)))
+      || (this.tab === "History" && isHistoryStatus(job.status)))
       .sort((a, b) => a.execute_at.localeCompare(b.execute_at));
   }
 
@@ -113,7 +113,7 @@ export class DeferredActionsPanel extends LitElement {
     if (job.status === "pending") return { label: "Pause", icon: "mdi:pause", operation: "pause" };
     if (job.status === "paused") return { label: "Resume", icon: "mdi:play", operation: "resume" };
     if (["failed", "missed"].includes(job.status)) return { label: "Run now", icon: "mdi:play", operation: "execute_now" };
-    if (["completed", "cancelled"].includes(job.status)) return { label: "Duplicate", icon: "mdi:content-copy", operation: "duplicate" };
+    if (["completed", "cancelled", "skipped", "expired"].includes(job.status)) return { label: "Duplicate", icon: "mdi:content-copy", operation: "duplicate" };
     return undefined;
   }
 
@@ -124,7 +124,7 @@ export class DeferredActionsPanel extends LitElement {
       ${["pending", "paused"].includes(job.status) ? html`
         <button @click=${() => this.openEditor(job)}><ha-icon icon="mdi:pencil-outline"></ha-icon>Edit</button>
         <button @click=${() => { this.quickDialog = { job, kind: "reschedule" }; this.menuJobId = undefined; }}><ha-icon icon="mdi:calendar-clock"></ha-icon>Reschedule</button>
-        <button @click=${() => { this.quickDialog = { job, kind: "extend" }; this.menuJobId = undefined; }}><ha-icon icon="mdi:timer-plus-outline"></ha-icon>Extend</button>` : nothing}
+        ${job.status === "pending" ? html`<button @click=${() => { this.quickDialog = { job, kind: "snooze" }; this.menuJobId = undefined; }}><ha-icon icon="mdi:timer-plus-outline"></ha-icon>Snooze</button>` : html`<button @click=${() => { this.quickDialog = { job, kind: "extend" }; this.menuJobId = undefined; }}><ha-icon icon="mdi:timer-plus-outline"></ha-icon>Extend</button>`}` : nothing}
       ${["pending", "paused", "failed", "missed"].includes(job.status) ? html`<button @click=${() => this.operate("execute_now", job)}><ha-icon icon="mdi:play"></ha-icon>Run now</button>` : nothing}
       <button @click=${() => { this.quickDialog = { job, kind: "duplicate" }; this.menuJobId = undefined; }}><ha-icon icon="mdi:content-copy"></ha-icon>Duplicate</button>
       ${["pending", "paused"].includes(job.status) ? html`<button class="warning" @click=${() => this.operate("cancel", job)}><ha-icon icon="mdi:cancel"></ha-icon>Cancel</button>` : nothing}
@@ -140,6 +140,7 @@ export class DeferredActionsPanel extends LitElement {
         <div class="job-head"><h3>${job.name}</h3>${job.status !== "pending" ? html`<span class="status ${job.status}">${job.status}</span>` : nothing}</div>
         <div class="time">${localDate(job.execute_at_local)} · ${relativeTime(job.execute_at)}</div>
         <p>${job.action_summary}</p>
+        ${job.terminal_reason ? html`<p class="compact">${job.terminal_reason}</p>` : nothing}
         ${job.last_error ? html`<div class="error compact">${job.last_error}</div>` : nothing}
       </div>
       <div class="row-actions" @click=${(event: Event) => event.stopPropagation()}>
@@ -157,16 +158,23 @@ export class DeferredActionsPanel extends LitElement {
       <div class="detail-actions">
         ${["pending", "paused"].includes(job.status) ? html`<button class="primary" @click=${() => this.openEditor(job)}>Edit action</button><button @click=${() => { this.quickDialog = { job, kind: "reschedule" }; }}>Change time</button>` : nothing}
       </div>
+      ${job.status === "pending" ? html`<div class="snooze"><span>Snooze</span><div class="chips">${snoozePresets.map((minutes) => html`<button @click=${() => this.operate("snooze", job, { duration: { minutes } })}>+${minutes < 60 ? `${minutes} min` : "1 hour"}</button>`)}</div><button class="link" @click=${() => { this.quickDialog = { job, kind: "snooze" }; }}>Custom</button></div>` : nothing}
       <details><summary>Additional information</summary><dl>
         ${Object.entries({
           "Job ID": job.id, Status: job.status, "Scheduled UTC": job.execute_at,
+          "Valid until": job.valid_until_local ? `${localDate(job.valid_until_local)} (${job.valid_until})` : "—",
+          Conditions: job.has_conditions ? `Yes — ${job.condition_failure} if false` : "None",
+          "Overdue behavior": effectiveOverdueLabel(job),
           Created: job.created_at, Modified: job.modified_at, Completed: job.completed_at || "—",
           Source: job.source, "Job key": job.job_key || "—", Tags: job.tags.join(", ") || "—",
-          "Target hints": job.target_entities.join(", ") || "—", Revision: String(job.revision),
+          "Resolved targets": job.target_entities.join(", ") || "—",
+          "Resolution hints": resolutionHints(job).join(", ") || "—", Revision: String(job.revision),
+          "Terminal reason": job.terminal_reason || "—",
           "Last error": job.last_error || "—",
         }).map(([label, value]) => html`<dt>${label}</dt><dd>${value}</dd>`)}
       </dl></details>
       <details><summary>Action sequence YAML</summary><pre>${dump(job.sequence, { noRefs: true })}</pre></details>
+      ${job.has_conditions ? html`<details><summary>Execution conditions YAML</summary><pre>${dump(job.conditions, { noRefs: true })}</pre></details>` : nothing}
       <details><summary>Attribution and diagnostics</summary><pre>${JSON.stringify(job.attribution, null, 2)}</pre>${Object.keys(job.linkage).length ? html`<pre>${JSON.stringify(job.linkage, null, 2)}</pre>` : nothing}</details>
     </section></div>`;
   }
@@ -189,8 +197,13 @@ export class DeferredActionsPanel extends LitElement {
         <label>Description<textarea name="description">${job?.description ?? ""}</textarea></label>
         <label>Job key<input name="job_key" .value=${job?.job_key ?? ""}></label>
         <label>Tags (comma separated)<input name="tags" .value=${job?.tags.join(", ") ?? ""}></label>
-        <label>Resolution entity hints<ha-entity-picker .hass=${this.hass} .value=${job?.target_entities[0] ?? ""} .allowCustomEntity=${true} @value-changed=${(event: CustomEvent<{ value: string }>) => { const input = (event.currentTarget as HTMLElement).parentElement?.querySelector("input[name=target_entities]") as HTMLInputElement | null; if (input) input.value = event.detail.value; }}></ha-entity-picker><input name="target_entities" type="hidden" .value=${job?.target_entities.join(", ") ?? ""}><small>Used to find this job later; it does not change the action target.</small></label>
+        <label>Resolution entity hints<ha-entity-picker .hass=${this.hass} .value=${resolutionHints(job)[0] ?? ""} .allowCustomEntity=${true} @value-changed=${(event: CustomEvent<{ value: string }>) => { const input = (event.currentTarget as HTMLElement).parentElement?.querySelector("input[name=target_entities]") as HTMLInputElement | null; if (input) input.value = event.detail.value; }}></ha-entity-picker><input name="target_entities" type="hidden" .value=${resolutionHints(job).join(", ")}><small>Used to find this job later; it does not change the action target.</small></label>
         ${job ? nothing : html`<label>When another action has this job key<select name="conflict_mode"><option value="keep_all">Keep both actions</option><option value="replace_same_key">Replace the existing action</option><option value="cancel_same_key">Cancel the existing action</option><option value="reject_same_key">Do not create this action</option></select></label>`}
+        <label>Execution conditions YAML<textarea class="yaml small-yaml" name="conditions_yaml">${job?.conditions.length ? dump(job.conditions, { noRefs: true }) : ""}</textarea><small>Normal Home Assistant conditions, evaluated immediately before the action.</small></label>
+        <label>If conditions are false<select name="condition_failure"><option value="skip" ?selected=${!job || job.condition_failure === "skip"}>Skip</option><option value="cancel" ?selected=${job?.condition_failure === "cancel"}>Cancel</option><option value="fail" ?selected=${job?.condition_failure === "fail"}>Fail</option></select></label>
+        <label>Valid until<input name="valid_until" type="datetime-local" .value=${job?.valid_until_local?.slice(0, 16) ?? ""}><small>The action will never begin at or after this cutoff.</small></label>
+        <label>Overdue recovery<select name="overdue_policy"><option value="" ?selected=${!job?.overdue_policy}>Use integration default</option><option value="execute" ?selected=${job?.overdue_policy === "execute"}>Execute</option><option value="skip" ?selected=${job?.overdue_policy === "skip"}>Skip as missed</option><option value="execute_within_grace" ?selected=${job?.overdue_policy === "execute_within_grace"}>Execute within grace</option></select></label>
+        <label>Job-specific grace (minutes)<input name="overdue_grace_minutes" type="number" min="0" .value=${job?.overdue_grace ? String(job.effective_overdue_grace_minutes) : ""} placeholder="Use integration default"></label>
       </details>
       <footer><button type="button" @click=${() => { this.editor = undefined; }}>Cancel</button><button class="primary" ?disabled=${this.busy}>${job ? "Save" : "Create"}</button></footer>
     </form></div>`;
@@ -211,7 +224,13 @@ export class DeferredActionsPanel extends LitElement {
         job_key: String(form.get("job_key") ?? "") || undefined,
         tags: String(form.get("tags") ?? "").split(",").map((tag) => tag.trim()).filter(Boolean),
         target_entities: String(form.get("target_entities") ?? "").split(",").map((entity) => entity.trim()).filter(Boolean), sequence,
+        conditions: String(form.get("conditions_yaml") ?? "").trim() ? load(String(form.get("conditions_yaml"))) : [],
+        condition_failure: String(form.get("condition_failure") ?? "skip"),
+        overdue_policy: String(form.get("overdue_policy") ?? "") || null,
+        overdue_grace: String(form.get("overdue_grace_minutes") ?? "") ? { minutes: Number(form.get("overdue_grace_minutes")) } : null,
+        valid_until: String(form.get("valid_until") ?? "") ? new Date(String(form.get("valid_until"))).toISOString() : null,
       };
+      if (!Array.isArray(common.conditions)) throw new Error("Conditions YAML must be a list");
       this.busy = true;
       if (this.editor?.job) await updateJob(this.hass, { job_id: this.editor.job.id, expected_revision: this.editor.job.revision, ...common });
       else {
@@ -238,9 +257,9 @@ export class DeferredActionsPanel extends LitElement {
   private renderQuickDialog() {
     const dialog = this.quickDialog;
     if (!dialog) return nothing;
-    const labels = { reschedule: "Reschedule action", extend: "Change remaining time", duplicate: "Duplicate action" };
+    const labels = { reschedule: "Reschedule action", extend: "Change remaining time", snooze: "Snooze action", duplicate: "Duplicate action" };
     return html`<div class="overlay"><form class="dialog small" @submit=${(event: SubmitEvent) => this.submitQuickDialog(event)}><header><h2>${labels[dialog.kind]}</h2><button type="button" class="icon" @click=${() => { this.quickDialog = undefined; }}><ha-icon icon="mdi:close"></ha-icon></button></header>
-      ${dialog.kind === "reschedule" ? html`<div class="two"><label>Date<input name="date" type="date" required></label><label>Time<input name="time" type="time" required></label></div>` : html`<label>${dialog.kind === "extend" ? "Minutes to add (negative reduces time)" : "Run the copy in how many minutes?"}<input name="minutes" type="number" .value=${dialog.kind === "extend" ? "15" : "20"} required></label>`}
+      ${dialog.kind === "reschedule" ? html`<div class="two"><label>Date<input name="date" type="date" required></label><label>Time<input name="time" type="time" required></label></div>` : html`<label>${dialog.kind === "extend" ? "Minutes to add (negative reduces time)" : dialog.kind === "snooze" ? "Minutes to snooze" : "Run the copy in how many minutes?"}<input name="minutes" type="number" min=${dialog.kind === "extend" ? nothing : "1"} .value=${dialog.kind === "extend" ? "15" : "20"} required></label>`}
       <footer><button type="button" @click=${() => { this.quickDialog = undefined; }}>Cancel</button><button class="primary">${dialog.kind === "duplicate" ? "Duplicate" : "Apply"}</button></footer></form></div>`;
   }
 
@@ -255,8 +274,8 @@ export class DeferredActionsPanel extends LitElement {
       await this.operate("reschedule", dialog.job, { execute_at: local.toISOString() });
     } else {
       const minutes = Number(form.get("minutes"));
-      if (!Number.isFinite(minutes) || (dialog.kind === "duplicate" ? minutes <= 0 : minutes === 0)) { this.error = "Enter a valid number of minutes"; return; }
-      await this.operate(dialog.kind, dialog.job, dialog.kind === "extend" ? { duration: { minutes } } : { delay: { minutes } });
+      if (!Number.isFinite(minutes) || (["duplicate", "snooze"].includes(dialog.kind) ? minutes <= 0 : minutes === 0)) { this.error = "Enter a valid number of minutes"; return; }
+      await this.operate(dialog.kind, dialog.job, ["extend", "snooze"].includes(dialog.kind) ? { duration: { minutes } } : { delay: { minutes } });
     }
     this.quickDialog = undefined;
   }
