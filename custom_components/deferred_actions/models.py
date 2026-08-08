@@ -119,6 +119,7 @@ class DeferredJob:
     attribution: dict[str, Any] = field(default_factory=dict)
     linkage: dict[str, Any] = field(default_factory=dict)
     last_error: str | None = None
+    terminal_reason: str | None = None
     revision: int = 1
 
     def to_storage(self) -> dict[str, Any]:
@@ -149,6 +150,14 @@ class DeferredJob:
         values.setdefault("overdue_policy", None)
         values.setdefault("overdue_grace", None)
         values.setdefault("valid_until", None)
+        values.setdefault("terminal_reason", None)
+        if (
+            not values["terminal_reason"]
+            and values.get("last_error")
+            and values.get("status") in {"cancelled", "expired", "skipped", "missed"}
+        ):
+            values["terminal_reason"] = values["last_error"]
+            values["last_error"] = None
         if values["condition_failure"] not in {"skip", "cancel", "fail"}:
             raise InvalidConditionError("Stored condition_failure is invalid")
         if values["overdue_policy"] not in {

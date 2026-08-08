@@ -17,6 +17,8 @@ export const localDate = (iso: string): string => new Intl.DateTimeFormat(undefi
 
 export const snoozePresets = [5, 15, 30, 60] as const;
 
+export const resolutionHints = (job?: DeferredJob): string[] => job?.explicit_target_entities ?? [];
+
 export const isHistoryStatus = (status: JobStatus): boolean =>
   ["completed", "cancelled", "missed", "skipped", "expired"].includes(status);
 

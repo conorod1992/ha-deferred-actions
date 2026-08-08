@@ -19,4 +19,8 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry) -> dict
         "scheduler_callback_active": manager.scheduler_active,
         "frontend_panel_registered": entry.runtime_data.panel_registered,
         "invalid_stored_record_count": len(manager.invalid_records),
+        "jobs_with_terminal_reason": sum(
+            job.terminal_reason is not None for job in manager.jobs.values()
+        ),
+        "jobs_with_last_error": sum(job.last_error is not None for job in manager.jobs.values()),
     }

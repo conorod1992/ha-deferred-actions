@@ -234,6 +234,8 @@ normalized record, UTC and local execution dates, remaining seconds and a safe a
 summary. Updates accept `expected_revision`; stale callers receive `revision_conflict`.
 Resolution accepts exact ID, exact job key, exact name, target entity hint, or the most
 recent pending job. Multiple matches produce candidates and require clarification.
+A duplicate with `valid_until` preserves the original validity window relative to its new
+scheduled time; it does not reuse the original absolute cutoff.
 
 ## Options and overdue recovery
 
@@ -266,6 +268,8 @@ Jobs use `pending`, `paused`, `executing`, `completed`, `cancelled`, `failed`, `
 `skipped`, and `expired`.
 An executing job cannot be edited, cancelled or deleted. History states cannot be edited
 back to pending; duplicate or execute an eligible failed/missed record instead.
+Normal terminal outcomes such as expiry, skipping and policy-driven misses use
+`terminal_reason`. `last_error` is reserved for genuine execution or condition failures.
 
 Home Assistant fires `deferred_actions_job_created`, `_updated`, `_started`, `_completed`,
 `_failed`, `_cancelled`, `_deleted`, `_missed`, `_skipped`, `_expired`, `_paused`, and

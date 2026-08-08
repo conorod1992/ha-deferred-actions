@@ -106,6 +106,8 @@ async def test_due_jobs_execute_independently(manager) -> None:
         await manager._async_due_callback(utc_now())
     assert manager.jobs[one["id"]].status == JobStatus.FAILED
     assert manager.jobs[two["id"]].status == JobStatus.COMPLETED
+    assert manager.jobs[one["id"]].last_error == "missing entity"
+    assert manager.jobs[one["id"]].terminal_reason is None
 
 
 async def test_bulk_requires_confirmation_and_selector(manager) -> None:
@@ -170,6 +172,12 @@ async def test_false_condition_behavior(manager, hass, mode, status, event) -> N
     assert result["status"] == status.value
     execute.assert_not_awaited()
     assert listener.await_count == 1
+    if mode == "fail":
+        assert result["last_error"] == "Execution conditions were false"
+        assert result["terminal_reason"] is None
+    else:
+        assert result["last_error"] is None
+        assert result["terminal_reason"] == "Execution conditions were false"
 
 
 async def test_true_condition_executes_and_execute_now_rechecks(manager) -> None:
@@ -281,6 +289,8 @@ async def test_expiry_wins_over_due_and_overdue_execution(manager) -> None:
     with patch("custom_components.deferred_actions.manager.async_execute_job", execute):
         await manager._async_recover_overdue()
     assert stored.status == JobStatus.EXPIRED
+    assert stored.last_error is None
+    assert stored.terminal_reason == "Validity cutoff passed before execution began"
     execute.assert_not_awaited()
     with pytest.raises(InvalidStatusError):
         await manager.async_execute_now(job["id"])
@@ -330,6 +340,135 @@ async def test_discovered_targets_merge_and_search(manager) -> None:
     assert manager.resolve(target_entity="binary_sensor.ready").id == job["id"]
 
 
+async def test_sequence_edit_replaces_discovered_targets_and_preserves_explicit_hints(
+    manager,
+) -> None:
+    job = await create(
+        manager,
+        sequence=[{"action": "light.turn_off", "target": {"entity_id": "light.office"}}],
+        target_entities=["switch.dynamic_hint"],
+    )
+    with patch(
+        "custom_components.deferred_actions.manager.async_validate_sequence",
+        AsyncMock(side_effect=lambda _hass, value: value),
+    ):
+        updated = await manager.async_update(
+            job["id"],
+            sequence=[{"action": "light.turn_off", "target": {"entity_id": "light.bedroom"}}],
+        )
+    assert updated["target_entities"] == ["light.bedroom", "switch.dynamic_hint"]
+    assert updated["explicit_target_entities"] == ["switch.dynamic_hint"]
+    assert "light.office" not in updated["target_entities"]
+
+    cleared = await manager.async_update(job["id"], target_entities=[])
+    assert cleared["target_entities"] == ["light.bedroom"]
+    assert cleared["explicit_target_entities"] == []
+
+
+async def test_update_clears_nullable_overrides(manager) -> None:
+    execute_at = utc_now() + timedelta(hours=1)
+    job = await create(
+        manager,
+        delay=None,
+        execute_at=execute_at.isoformat(),
+        valid_until=(execute_at + timedelta(minutes=30)).isoformat(),
+        overdue_policy="execute_within_grace",
+        overdue_grace={"minutes": 5},
+        conditions=[{"condition": "state", "entity_id": "switch.ready", "state": "on"}],
+        target_entities=["switch.dynamic_hint"],
+    )
+    with patch(
+        "custom_components.deferred_actions.manager.async_validate_conditions",
+        AsyncMock(return_value=[]),
+    ):
+        updated = await manager.async_update(
+            job["id"],
+            valid_until=None,
+            overdue_policy=None,
+            overdue_grace=None,
+            conditions=[],
+            target_entities=[],
+        )
+    assert updated["valid_until"] is None
+    assert updated["overdue_policy"] is None
+    assert updated["overdue_grace"] is None
+    assert updated["conditions"] == []
+    assert updated["condition_entities"] == []
+    assert updated["explicit_target_entities"] == []
+
+
+async def test_valid_until_remains_consistent_during_edits(manager) -> None:
+    execute_at = utc_now() + timedelta(hours=1)
+    cutoff = execute_at + timedelta(minutes=30)
+    job = await create(
+        manager,
+        delay=None,
+        execute_at=execute_at.isoformat(),
+        valid_until=cutoff.isoformat(),
+    )
+    with pytest.raises(InvalidTimeError):
+        await manager.async_reschedule(
+            job["id"], execute_at=(cutoff + timedelta(minutes=1)).isoformat()
+        )
+    with pytest.raises(InvalidTimeError):
+        await manager.async_update(job["id"], valid_until=execute_at.isoformat())
+
+    unchanged = await manager.async_update(job["id"], name="Renamed")
+    assert unchanged["valid_until"] == cutoff.isoformat().replace("+00:00", "Z")
+    cleared = await manager.async_update(job["id"], valid_until=None)
+    assert cleared["valid_until"] is None
+
+
+@pytest.mark.parametrize("status", [JobStatus.COMPLETED, JobStatus.EXPIRED])
+async def test_duplicate_preserves_relative_validity_window(manager, status) -> None:
+    original_execute_at = utc_now() + timedelta(hours=1)
+    original = await create(
+        manager,
+        delay=None,
+        execute_at=original_execute_at.isoformat(),
+        valid_until=(original_execute_at + timedelta(minutes=30)).isoformat(),
+    )
+    stored = manager.jobs[original["id"]]
+    stored.status = status
+    if status == JobStatus.EXPIRED:
+        stored.execute_at = utc_now() - timedelta(hours=2)
+        stored.valid_until = stored.execute_at + timedelta(minutes=30)
+
+    with (
+        patch(
+            "custom_components.deferred_actions.manager.async_validate_sequence",
+            AsyncMock(side_effect=lambda _hass, value: value),
+        ),
+        patch(
+            "custom_components.deferred_actions.manager.async_validate_conditions",
+            AsyncMock(side_effect=lambda _hass, value: value or []),
+        ),
+    ):
+        duplicate = await manager.async_duplicate(original["id"], delay={"hours": 3})
+
+    duplicate_execute_at = datetime.fromisoformat(duplicate["execute_at"].replace("Z", "+00:00"))
+    duplicate_valid_until = datetime.fromisoformat(duplicate["valid_until"].replace("Z", "+00:00"))
+    assert duplicate_valid_until - duplicate_execute_at == timedelta(minutes=30)
+    assert stored.status == status
+
+
+async def test_duplicate_without_valid_until_remains_without_expiry(manager) -> None:
+    original = await create(manager)
+    manager.jobs[original["id"]].status = JobStatus.CANCELLED
+    with (
+        patch(
+            "custom_components.deferred_actions.manager.async_validate_sequence",
+            AsyncMock(side_effect=lambda _hass, value: value),
+        ),
+        patch(
+            "custom_components.deferred_actions.manager.async_validate_conditions",
+            AsyncMock(side_effect=lambda _hass, value: value or []),
+        ),
+    ):
+        duplicate = await manager.async_duplicate(original["id"], delay={"minutes": 15})
+    assert duplicate["valid_until"] is None
+
+
 async def test_safe_create_allow_block_templates_and_attribution(manager) -> None:
     with (
         patch(
@@ -375,6 +514,42 @@ async def test_safe_create_allow_block_templates_and_attribution(manager) -> Non
                 action="light.turn_on",
                 target_entities=["light.one"],
                 data={"brightness": "{{ 1 }}"},
+                delay={"minutes": 5},
+            )
+        with pytest.raises(UnsafeActionError, match="literal entity IDs"):
+            await manager.async_create_safe(
+                name="Malformed target",
+                action="light.turn_on",
+                target_entities=["light.office\nlight.bedroom"],
+                delay={"minutes": 5},
+            )
+        with pytest.raises(UnsafeActionError, match="unsupported fields"):
+            await manager.async_create_safe(
+                name="Nested condition",
+                action="light.turn_on",
+                target_entities=["light.one"],
+                conditions=[
+                    {
+                        "condition": "state",
+                        "entity_id": "switch.ready",
+                        "state": "on",
+                        "sequence": [{"action": "light.turn_off"}],
+                    }
+                ],
+                delay={"minutes": 5},
+            )
+        with pytest.raises(UnsafeActionError, match="literal entity IDs"):
+            await manager.async_create_safe(
+                name="Templated condition",
+                action="light.turn_on",
+                target_entities=["light.one"],
+                conditions=[
+                    {
+                        "condition": "state",
+                        "entity_id": "{{ dynamic_entity }}",
+                        "state": "on",
+                    }
+                ],
                 delay={"minutes": 5},
             )
         with pytest.raises(UnsafeActionError, match="fields are not accepted"):

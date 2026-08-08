@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import voluptuous as vol
@@ -32,16 +33,31 @@ SERVICE_NAMES = (
     "cleanup_history",
 )
 
+_NONNEGATIVE_NUMBER = vol.All(vol.Coerce(float), vol.Range(min=0))
+_DURATION_SCHEMA = vol.Schema(
+    {
+        vol.Optional("days"): _NONNEGATIVE_NUMBER,
+        vol.Optional("hours"): _NONNEGATIVE_NUMBER,
+        vol.Optional("minutes"): _NONNEGATIVE_NUMBER,
+        vol.Optional("seconds"): _NONNEGATIVE_NUMBER,
+        vol.Optional("milliseconds"): _NONNEGATIVE_NUMBER,
+    },
+    extra=vol.PREVENT_EXTRA,
+)
+_TIMESTAMP = vol.Any(str, datetime)
+_NULLABLE_TIMESTAMP = vol.Any(None, str, datetime)
+_OVERDUE_POLICY = vol.In(("execute", "skip", "execute_within_grace"))
+
 _CREATE_FIELDS = {
     vol.Required("name"): str,
     vol.Required("sequence"): list,
-    vol.Optional("execute_at"): vol.Any(str, object),
-    vol.Optional("delay"): dict,
+    vol.Optional("execute_at"): _TIMESTAMP,
+    vol.Optional("delay"): _DURATION_SCHEMA,
     vol.Optional("conditions"): list,
     vol.Optional("condition_failure"): vol.In(("skip", "cancel", "fail")),
-    vol.Optional("overdue_policy"): vol.In(("execute", "skip", "execute_within_grace")),
-    vol.Optional("overdue_grace"): dict,
-    vol.Optional("valid_until"): vol.Any(str, object),
+    vol.Optional("overdue_policy"): _OVERDUE_POLICY,
+    vol.Optional("overdue_grace"): _DURATION_SCHEMA,
+    vol.Optional("valid_until"): _TIMESTAMP,
 }
 
 SERVICE_SCHEMAS = {
@@ -53,22 +69,52 @@ SERVICE_SCHEMAS = {
             vol.Exclusive("service", "safe_action"): str,
             vol.Required("target_entities"): vol.Any(str, [str]),
             vol.Optional("data"): dict,
-            vol.Optional("execute_at"): vol.Any(str, object),
-            vol.Optional("delay"): dict,
+            vol.Optional("execute_at"): _TIMESTAMP,
+            vol.Optional("delay"): _DURATION_SCHEMA,
             vol.Optional("description"): str,
             vol.Optional("job_key"): str,
             vol.Optional("tags"): [str],
             vol.Optional("conflict_mode"): str,
             vol.Optional("conditions"): list,
             vol.Optional("condition_failure"): vol.In(("skip", "cancel", "fail")),
-            vol.Optional("overdue_policy"): vol.In(("execute", "skip", "execute_within_grace")),
-            vol.Optional("overdue_grace"): dict,
-            vol.Optional("valid_until"): vol.Any(str, object),
+            vol.Optional("overdue_policy"): _OVERDUE_POLICY,
+            vol.Optional("overdue_grace"): _DURATION_SCHEMA,
+            vol.Optional("valid_until"): _TIMESTAMP,
+        },
+        extra=vol.PREVENT_EXTRA,
+    ),
+    "update": vol.Schema(
+        {
+            vol.Required("job_id"): str,
+            vol.Optional("expected_revision"): vol.All(vol.Coerce(int), vol.Range(min=1)),
+            vol.Optional("conditions"): vol.Any(None, list),
+            vol.Optional("condition_failure"): vol.In(("skip", "cancel", "fail")),
+            vol.Optional("overdue_policy"): vol.Any(None, _OVERDUE_POLICY),
+            vol.Optional("overdue_grace"): vol.Any(None, _DURATION_SCHEMA),
+            vol.Optional("valid_until"): _NULLABLE_TIMESTAMP,
+            vol.Optional("target_entities"): list,
+        },
+        extra=vol.ALLOW_EXTRA,
+    ),
+    "reschedule": vol.Schema(
+        {
+            vol.Required("job_id"): str,
+            vol.Optional("execute_at"): _TIMESTAMP,
+            vol.Optional("delay"): _DURATION_SCHEMA,
+        },
+        extra=vol.PREVENT_EXTRA,
+    ),
+    "duplicate": vol.Schema(
+        {
+            vol.Required("job_id"): str,
+            vol.Optional("name"): str,
+            vol.Optional("execute_at"): _TIMESTAMP,
+            vol.Optional("delay"): _DURATION_SCHEMA,
         },
         extra=vol.PREVENT_EXTRA,
     ),
     "snooze": vol.Schema(
-        {vol.Required("job_id"): str, vol.Required("duration"): dict},
+        {vol.Required("job_id"): str, vol.Required("duration"): _DURATION_SCHEMA},
         extra=vol.PREVENT_EXTRA,
     ),
 }

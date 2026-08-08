@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { effectiveOverdueLabel, isHistoryStatus, relativeTime, snoozePresets } from "./format";
+import { effectiveOverdueLabel, isHistoryStatus, relativeTime, resolutionHints, snoozePresets } from "./format";
 import type { DeferredJob } from "./types";
 
 describe("relativeTime", () => {
@@ -31,5 +31,14 @@ describe("job presentation", () => {
     job.overdue_policy = "skip";
     job.effective_overdue_policy = "skip";
     expect(effectiveOverdueLabel(job)).toBe("skip (job override)");
+  });
+
+  it("uses only explicit resolution hints", () => {
+    const job = {
+      target_entities: ["light.office", "switch.dynamic_hint"],
+      explicit_target_entities: ["switch.dynamic_hint"],
+    } as DeferredJob;
+    expect(resolutionHints(job)).toEqual(["switch.dynamic_hint"]);
+    expect(resolutionHints()).toEqual([]);
   });
 });

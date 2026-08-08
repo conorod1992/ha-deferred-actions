@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant, callback, valid_entity_id
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.util import dt as dt_util
@@ -131,6 +131,8 @@ class DeferredActionsManager:
         }
         if job.last_error:
             data["error"] = job.last_error
+        if job.terminal_reason:
+            data["reason"] = job.terminal_reason
         return data
 
     @callback
@@ -205,30 +207,39 @@ class DeferredActionsManager:
         except Exception as err:  # Home Assistant action errors are heterogeneous
             _LOGGER.exception("Deferred action %s failed", job.id)
             status = JobStatus.FAILED
-            error = str(err)[:500] or type(err).__name__
+            last_error = str(err)[:500] or type(err).__name__
+            terminal_reason = None
             event = "job_failed"
         else:
             if not conditions_pass:
-                error = "Execution conditions were false"
+                reason = "Execution conditions were false"
                 if job.condition_failure == CONDITION_CANCEL:
                     status = JobStatus.CANCELLED
+                    last_error = None
+                    terminal_reason = reason
                     event = "job_cancelled"
                 elif job.condition_failure == CONDITION_FAIL:
                     status = JobStatus.FAILED
+                    last_error = reason
+                    terminal_reason = None
                     event = "job_failed"
                 else:
                     status = JobStatus.SKIPPED
+                    last_error = None
+                    terminal_reason = reason
                     event = "job_skipped"
             else:
                 status = JobStatus.COMPLETED
-                error = None
+                last_error = None
+                terminal_reason = None
                 event = "job_completed"
         async with self._lock:
             current = self.jobs.get(job.id)
             if current is None or current.status != JobStatus.EXECUTING:
                 return self._public(job)
             current.status = status
-            current.last_error = error
+            current.last_error = last_error
+            current.terminal_reason = terminal_reason
             current.completed_at = utc_now()
             current.modified_at = current.completed_at
             current.revision += 1
@@ -240,7 +251,8 @@ class DeferredActionsManager:
         job.status = JobStatus.EXPIRED
         job.completed_at = now
         job.modified_at = now
-        job.last_error = "Validity cutoff passed before execution began"
+        job.last_error = None
+        job.terminal_reason = "Validity cutoff passed before execution began"
         job.revision += 1
         self._notify("job_expired", job)
 
@@ -294,6 +306,7 @@ class DeferredActionsManager:
                     job.completed_at = now
                     job.modified_at = now
                     job.last_error = "Execution was interrupted by a Home Assistant restart or integration reload"
+                    job.terminal_reason = None
                     job.revision += 1
                     self._notify("job_failed", job)
                     continue
@@ -319,7 +332,10 @@ class DeferredActionsManager:
                 else:
                     job.status = JobStatus.MISSED
                     job.completed_at = now
-                    job.last_error = "Execution time passed while Home Assistant was unavailable"
+                    job.last_error = None
+                    job.terminal_reason = (
+                        "Execution time passed while Home Assistant was unavailable"
+                    )
                     self._notify("job_missed", job)
                 job.modified_at = now
                 job.revision += 1
@@ -517,7 +533,7 @@ class DeferredActionsManager:
         if not entities or any(
             not isinstance(entity, str)
             or self._contains_template(entity)
-            or entity.count(".") != 1
+            or not valid_entity_id(entity)
             or entity.split(".", 1)[0] != domain
             for entity in entities
         ):
@@ -540,7 +556,26 @@ class DeferredActionsManager:
                 raise UnsafeActionError(
                     "create_safe only accepts simple state or numeric_state conditions"
                 )
-            if self._contains_template(item) or not extract_entity_ids(item):
+            allowed_condition_keys = (
+                {"condition", "entity_id", "state", "attribute"}
+                if item.get("condition") == "state"
+                else {"condition", "entity_id", "above", "below", "attribute"}
+            )
+            if set(item) - allowed_condition_keys:
+                raise UnsafeActionError("safe condition contains unsupported fields")
+            condition_entities = item.get("entity_id")
+            condition_entities = (
+                [condition_entities] if isinstance(condition_entities, str) else condition_entities
+            )
+            if (
+                self._contains_template(item)
+                or not isinstance(condition_entities, list)
+                or not condition_entities
+                or any(
+                    not isinstance(entity, str) or not valid_entity_id(entity)
+                    for entity in condition_entities
+                )
+            ):
                 raise UnsafeActionError(
                     "safe conditions require literal entity IDs and no templates"
                 )
@@ -672,6 +707,20 @@ class DeferredActionsManager:
             )
         if "overdue_policy" in changes or "overdue_grace" in changes:
             self._validate_overdue(changes.get("overdue_policy"), changes.get("overdue_grace"))
+        allowed = {
+            "name",
+            "description",
+            "sequence",
+            "job_key",
+            "tags",
+            "target_entities",
+            "conditions",
+            "condition_failure",
+            "overdue_policy",
+            "overdue_grace",
+            "valid_until",
+        }
+        validated_changes = {key: value for key, value in changes.items() if key in allowed}
         async with self._lock:
             job = self.resolve(job_id=job_id)
             if job.status not in {JobStatus.PENDING, JobStatus.PAUSED}:
@@ -680,24 +729,12 @@ class DeferredActionsManager:
                 raise RevisionConflictError(
                     f"Expected revision {expected_revision}, current revision is {job.revision}"
                 )
-            allowed = {
-                "name",
-                "description",
-                "sequence",
-                "job_key",
-                "tags",
-                "target_entities",
-                "conditions",
-                "condition_failure",
-                "overdue_policy",
-                "overdue_grace",
-                "valid_until",
-            }
-            for key, value in changes.items():
-                if key in allowed:
-                    if key == "valid_until":
-                        value = self._parse_valid_until(value, job.execute_at)
-                    setattr(job, key, value)
+            if "valid_until" in validated_changes:
+                validated_changes["valid_until"] = self._parse_valid_until(
+                    validated_changes["valid_until"], job.execute_at
+                )
+            for key, value in validated_changes.items():
+                setattr(job, key, value)
             if sequence is not None or "target_entities" in changes:
                 if "target_entities" in changes:
                     job.explicit_target_entities = list(changes["target_entities"] or [])
@@ -836,6 +873,8 @@ class DeferredActionsManager:
                     job.status = JobStatus.MISSED
                     job.completed_at = now
                     job.modified_at = now
+                    job.last_error = None
+                    job.terminal_reason = "Execution time passed while the job was paused"
                     job.revision += 1
                     await self._save_and_schedule_locked()
                     self._notify("job_missed", job)
@@ -865,6 +904,7 @@ class DeferredActionsManager:
             job.status = JobStatus.EXECUTING
             job.completed_at = None
             job.last_error = None
+            job.terminal_reason = None
             job.modified_at = now
             job.revision += 1
             await self._save_and_schedule_locked()
@@ -891,12 +931,16 @@ class DeferredActionsManager:
         name: str | None = None,
     ) -> dict[str, Any]:
         original = self.resolve(job_id=job_id)
+        when = self._calculate_time(execute_at, delay)
+        validity_window = (
+            original.valid_until - original.execute_at if original.valid_until else None
+        )
+        duplicate_valid_until = when + validity_window if validity_window is not None else None
         return await self.async_create(
             name=name or f"{original.name} (copy)",
             description=original.description,
             sequence=original.sequence,
-            execute_at=execute_at,
-            delay=delay,
+            execute_at=when,
             tags=original.tags,
             source=original.source,
             target_entities=original.explicit_target_entities,
@@ -904,7 +948,7 @@ class DeferredActionsManager:
             condition_failure=original.condition_failure,
             overdue_policy=original.overdue_policy,
             overdue_grace=original.overdue_grace,
-            valid_until=original.valid_until,
+            valid_until=duplicate_valid_until,
             attribution=original.attribution,
             linkage={"duplicated_from": original.id},
             conflict_mode=CONFLICT_KEEP_ALL,

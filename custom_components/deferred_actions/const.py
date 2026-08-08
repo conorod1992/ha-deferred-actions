@@ -12,7 +12,7 @@ PLATFORMS: Final = ["sensor"]
 
 STORAGE_KEY: Final = f"{DOMAIN}.jobs"
 STORAGE_VERSION: Final = 1
-STORAGE_MINOR_VERSION: Final = 2
+STORAGE_MINOR_VERSION: Final = 3
 
 CONF_OVERDUE_POLICY: Final = "overdue_policy"
 CONF_OVERDUE_GRACE_MINUTES: Final = "overdue_grace_minutes"

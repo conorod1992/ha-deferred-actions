@@ -24,6 +24,7 @@ export interface DeferredJob {
   tags: string[];
   source: string;
   target_entities: string[];
+  explicit_target_entities: string[];
   condition_entities: string[];
   conditions: Record<string, unknown>[];
   has_conditions: boolean;
@@ -37,6 +38,7 @@ export interface DeferredJob {
   attribution: Record<string, unknown>;
   linkage: Record<string, unknown>;
   last_error?: string;
+  terminal_reason?: string;
   revision: number;
 }
 

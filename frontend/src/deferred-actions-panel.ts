@@ -2,7 +2,7 @@ import { LitElement, css, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { dump, load } from "js-yaml";
 import { createJob, listJobs, operateJob, subscribeJobs, updateJob } from "./api";
-import { effectiveOverdueLabel, isHistoryStatus, localDate, relativeTime, snoozePresets } from "./format";
+import { effectiveOverdueLabel, isHistoryStatus, localDate, relativeTime, resolutionHints, snoozePresets } from "./format";
 import type { DeferredJob, HomeAssistant, PushEvent, QueueSummary } from "./types";
 
 type Tab = "Pending" | "Paused" | "Failed" | "History" | "All";
@@ -140,6 +140,7 @@ export class DeferredActionsPanel extends LitElement {
         <div class="job-head"><h3>${job.name}</h3>${job.status !== "pending" ? html`<span class="status ${job.status}">${job.status}</span>` : nothing}</div>
         <div class="time">${localDate(job.execute_at_local)} · ${relativeTime(job.execute_at)}</div>
         <p>${job.action_summary}</p>
+        ${job.terminal_reason ? html`<p class="compact">${job.terminal_reason}</p>` : nothing}
         ${job.last_error ? html`<div class="error compact">${job.last_error}</div>` : nothing}
       </div>
       <div class="row-actions" @click=${(event: Event) => event.stopPropagation()}>
@@ -166,7 +167,9 @@ export class DeferredActionsPanel extends LitElement {
           "Overdue behavior": effectiveOverdueLabel(job),
           Created: job.created_at, Modified: job.modified_at, Completed: job.completed_at || "—",
           Source: job.source, "Job key": job.job_key || "—", Tags: job.tags.join(", ") || "—",
-          "Target hints": job.target_entities.join(", ") || "—", Revision: String(job.revision),
+          "Resolved targets": job.target_entities.join(", ") || "—",
+          "Resolution hints": resolutionHints(job).join(", ") || "—", Revision: String(job.revision),
+          "Terminal reason": job.terminal_reason || "—",
           "Last error": job.last_error || "—",
         }).map(([label, value]) => html`<dt>${label}</dt><dd>${value}</dd>`)}
       </dl></details>
@@ -194,7 +197,7 @@ export class DeferredActionsPanel extends LitElement {
         <label>Description<textarea name="description">${job?.description ?? ""}</textarea></label>
         <label>Job key<input name="job_key" .value=${job?.job_key ?? ""}></label>
         <label>Tags (comma separated)<input name="tags" .value=${job?.tags.join(", ") ?? ""}></label>
-        <label>Resolution entity hints<ha-entity-picker .hass=${this.hass} .value=${job?.target_entities[0] ?? ""} .allowCustomEntity=${true} @value-changed=${(event: CustomEvent<{ value: string }>) => { const input = (event.currentTarget as HTMLElement).parentElement?.querySelector("input[name=target_entities]") as HTMLInputElement | null; if (input) input.value = event.detail.value; }}></ha-entity-picker><input name="target_entities" type="hidden" .value=${job?.target_entities.join(", ") ?? ""}><small>Used to find this job later; it does not change the action target.</small></label>
+        <label>Resolution entity hints<ha-entity-picker .hass=${this.hass} .value=${resolutionHints(job)[0] ?? ""} .allowCustomEntity=${true} @value-changed=${(event: CustomEvent<{ value: string }>) => { const input = (event.currentTarget as HTMLElement).parentElement?.querySelector("input[name=target_entities]") as HTMLInputElement | null; if (input) input.value = event.detail.value; }}></ha-entity-picker><input name="target_entities" type="hidden" .value=${resolutionHints(job).join(", ")}><small>Used to find this job later; it does not change the action target.</small></label>
         ${job ? nothing : html`<label>When another action has this job key<select name="conflict_mode"><option value="keep_all">Keep both actions</option><option value="replace_same_key">Replace the existing action</option><option value="cancel_same_key">Cancel the existing action</option><option value="reject_same_key">Do not create this action</option></select></label>`}
         <label>Execution conditions YAML<textarea class="yaml small-yaml" name="conditions_yaml">${job?.conditions.length ? dump(job.conditions, { noRefs: true }) : ""}</textarea><small>Normal Home Assistant conditions, evaluated immediately before the action.</small></label>
         <label>If conditions are false<select name="condition_failure"><option value="skip" ?selected=${!job || job.condition_failure === "skip"}>Skip</option><option value="cancel" ?selected=${job?.condition_failure === "cancel"}>Cancel</option><option value="fail" ?selected=${job?.condition_failure === "fail"}>Fail</option></select></label>

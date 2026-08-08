@@ -84,6 +84,7 @@ def test_old_storage_record_gets_new_defaults() -> None:
         "overdue_policy",
         "overdue_grace",
         "valid_until",
+        "terminal_reason",
     ):
         record.pop(key)
     restored = DeferredJob.from_storage(record)
@@ -91,6 +92,25 @@ def test_old_storage_record_gets_new_defaults() -> None:
     assert restored.condition_failure == "skip"
     assert restored.overdue_policy is None
     assert restored.valid_until is None
+    assert restored.terminal_reason is None
+
+
+def test_old_normal_terminal_error_migrates_to_reason() -> None:
+    now = datetime(2026, 8, 2, 18, tzinfo=UTC)
+    record = DeferredJob(
+        id="old-expired",
+        name="Old expired job",
+        execute_at=now,
+        sequence=[{"action": "light.turn_off"}],
+        created_at=now,
+        modified_at=now,
+        status=JobStatus.EXPIRED,
+        last_error="Validity cutoff passed before execution began",
+    ).to_storage()
+    record.pop("terminal_reason")
+    restored = DeferredJob.from_storage(record)
+    assert restored.last_error is None
+    assert restored.terminal_reason == "Validity cutoff passed before execution began"
 
 
 def test_extract_nested_literal_entity_targets() -> None:
