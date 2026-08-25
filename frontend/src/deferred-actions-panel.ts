@@ -3,8 +3,8 @@ import { customElement, property, state } from "lit/decorators.js";
 import { dump, load } from "js-yaml";
 import { createJob, listJobs, operateJob, runFor, subscribeJobs, updateJob } from "./api";
 import {
-  conditionsToVisual, friendlyError, parsePrimitive, sequenceToVisual, visualToConditions, visualToSequence,
-  type VisualAction, type VisualCondition, type VisualConditions, type VisualTarget,
+  conditionsToVisual, dataEntryWithType, presentError, sequenceToVisual, UserFacingError, visualToConditions, visualToSequence,
+  type DataEntry, type DataValueType, type VisualAction, type VisualCondition, type VisualConditions, type VisualTarget,
 } from "./editor-model";
 import { effectiveOverdueLabel, isHistoryStatus, localDate, relativeTime, resolutionHints, snoozePresets } from "./format";
 import type { DeferredJob, HomeAssistant, PushEvent, QueueSummary } from "./types";
@@ -130,9 +130,9 @@ export class DeferredActionsPanel extends LitElement {
   }
 
   private setError(error: unknown): void {
-    const friendly = friendlyError(error);
-    this.error = friendly.message;
-    this.errorDetails = friendly.details === friendly.message ? undefined : friendly.details;
+    const presented = presentError(error);
+    this.error = presented.message;
+    this.errorDetails = presented.details;
   }
 
   private openEditor(job?: DeferredJob): void {
@@ -276,9 +276,15 @@ export class DeferredActionsPanel extends LitElement {
       <div class="section-head"><strong>Action ${index + 1}</strong>${this.visualActions.length > 1 ? html`<button type="button" class="link danger" @click=${() => { this.visualActions = this.visualActions.filter((_, itemIndex) => itemIndex !== index); }}>Remove</button>` : nothing}</div>
       <label>Service<ha-service-picker .hass=${this.hass} .value=${action.action} @value-changed=${(event: CustomEvent<{ value: string }>) => this.updateAction(index, { action: event.detail.value })}></ha-service-picker></label>
       <label>Target<ha-target-picker .hass=${this.hass} .value=${action.target} @value-changed=${(event: CustomEvent<{ value: VisualTarget }>) => this.updateAction(index, { target: event.detail.value })}></ha-target-picker><small>Choose entities, devices, or areas. Leave empty for services that do not need a target.</small></label>
-      <div class="section-head"><strong>Action data</strong><button type="button" class="link" @click=${() => this.updateAction(index, { data: [...action.data, { key: "", value: "" }] })}>Add field</button></div>
-      ${action.data.map((entry, dataIndex) => html`<div class="data-row"><input aria-label="Data field" placeholder="brightness_pct" .value=${entry.key} @input=${(event: InputEvent) => this.updateData(index, dataIndex, { key: (event.currentTarget as HTMLInputElement).value })}><input aria-label="Data value" placeholder="60 or message text" .value=${String(entry.value ?? "")} @input=${(event: InputEvent) => this.updateData(index, dataIndex, { value: parsePrimitive((event.currentTarget as HTMLInputElement).value) })}><button type="button" class="icon" title="Remove data field" @click=${() => this.updateAction(index, { data: action.data.filter((_, itemIndex) => itemIndex !== dataIndex) })}><ha-icon icon="mdi:close"></ha-icon></button></div>`)}
+      <div class="section-head"><strong>Action data</strong><button type="button" class="link" @click=${() => this.updateAction(index, { data: [...action.data, { key: "", type: "text", value: "", raw: "" }] })}>Add field</button></div>
+      ${action.data.map((entry, dataIndex) => html`<div class="data-row"><input aria-label="Data field" placeholder="brightness_pct" .value=${entry.key} @input=${(event: InputEvent) => this.updateData(index, dataIndex, { key: (event.currentTarget as HTMLInputElement).value })}><select aria-label="Data value type" .value=${entry.type} @change=${(event: Event) => this.setDataType(index, dataIndex, (event.currentTarget as HTMLSelectElement).value as DataValueType)}><option value="text">Text</option><option value="number">Number</option><option value="boolean">Boolean</option><option value="null">Null</option></select>${this.renderDataValue(index, dataIndex, entry)}<button type="button" class="icon" title="Remove data field" @click=${() => this.updateAction(index, { data: action.data.filter((_, itemIndex) => itemIndex !== dataIndex) })}><ha-icon icon="mdi:close"></ha-icon></button></div>`)}
     </article>`)}<button type="button" @click=${() => { this.visualActions = [...this.visualActions, { action: "", target: {}, data: [] }]; }}><ha-icon icon="mdi:plus"></ha-icon>Add another action</button>`;
+  }
+
+  private renderDataValue(actionIndex: number, dataIndex: number, entry: DataEntry) {
+    if (entry.type === "null") return html`<span class="null-value">No value</span>`;
+    if (entry.type === "boolean") return html`<select aria-label="Boolean value" .value=${entry.value === true ? "true" : "false"} @change=${(event: Event) => this.updateData(actionIndex, dataIndex, { value: (event.currentTarget as HTMLSelectElement).value === "true" })}><option value="true">True</option><option value="false">False</option></select>`;
+    return html`<input aria-label="Data value" type=${entry.type === "number" ? "number" : "text"} step=${entry.type === "number" ? "any" : ""} placeholder=${entry.type === "number" ? "42" : "Message text"} .value=${entry.raw ?? String(entry.value ?? "")} @input=${(event: InputEvent) => this.updateData(actionIndex, dataIndex, { raw: (event.currentTarget as HTMLInputElement).value })}>`;
   }
 
   private renderNormalOptions(job?: DeferredJob) {
@@ -311,8 +317,8 @@ export class DeferredActionsPanel extends LitElement {
       if (!this.editor?.job && this.creationKind === "run_for") {
         const value = Number(form.get("delay_value"));
         const unit = String(form.get("delay_unit"));
-        if (!Number.isFinite(value) || value <= 0) throw new Error("Duration must be greater than zero");
-        if (!this.runForStart || !this.runForEnd || !Object.values(this.runForTarget).some((ids) => ids?.length)) throw new Error("Choose a target, start action, and end action");
+        if (!Number.isFinite(value) || value <= 0) throw new UserFacingError("Duration must be greater than zero");
+        if (!this.runForStart || !this.runForEnd || !Object.values(this.runForTarget).some((ids) => ids?.length)) throw new UserFacingError("Choose a target, start action, and end action");
         this.busy = true;
         await runFor(this.hass, {
           name: String(form.get("name")), description: String(form.get("description") ?? "") || undefined,
@@ -328,13 +334,13 @@ export class DeferredActionsPanel extends LitElement {
         return;
       }
       const sequence = this.editor?.mode === "visual" ? visualToSequence(this.visualActions) : load(this.actionYaml);
-      if (!Array.isArray(sequence)) throw new Error("Advanced YAML must be a list of actions");
-      if (this.editor?.mode === "visual" && (this.visualActions.length === 0 || this.visualActions.some((action) => !action.action))) throw new Error("Choose a service for every action");
+      if (!Array.isArray(sequence)) throw new UserFacingError("Advanced YAML must be a list of actions");
+      if (this.editor?.mode === "visual" && (this.visualActions.length === 0 || this.visualActions.some((action) => !action.action))) throw new UserFacingError("Choose a service for every action");
       const conditions = this.conditionMode === "visual" ? visualToConditions(this.visualConditions) : (this.conditionsYaml.trim() ? load(this.conditionsYaml) : []);
       if (this.conditionMode === "visual" && this.visualConditions.items.some((condition) =>
         condition.type === "state" ? !condition.entity_id || !condition.state
           : condition.type === "numeric_state" ? !condition.entity_id || (!condition.above.trim() && !condition.below.trim())
-            : !condition.after && !condition.before && condition.weekdays.length === 0)) throw new Error("Complete or remove each condition");
+            : !condition.after && !condition.before && condition.weekdays.length === 0)) throw new UserFacingError("Complete or remove each condition");
       const common = {
         name: String(form.get("name")), description: String(form.get("description") ?? "") || undefined,
         job_key: String(form.get("job_key") ?? "") || undefined,
@@ -346,7 +352,7 @@ export class DeferredActionsPanel extends LitElement {
         overdue_grace: String(form.get("overdue_grace_minutes") ?? "") ? { minutes: Number(form.get("overdue_grace_minutes")) } : null,
         valid_until: String(form.get("valid_until") ?? "") ? new Date(String(form.get("valid_until"))).toISOString() : null,
       };
-      if (!Array.isArray(common.conditions)) throw new Error("Conditions YAML must be a list");
+      if (!Array.isArray(common.conditions)) throw new UserFacingError("Conditions YAML must be a list");
       this.busy = true;
       if (this.editor?.job) await updateJob(this.hass, { job_id: this.editor.job.id, expected_revision: this.editor.job.revision, ...common });
       else {
@@ -355,12 +361,12 @@ export class DeferredActionsPanel extends LitElement {
           const date = String(form.get("date"));
           const time = String(form.get("time"));
           const local = new Date(`${date}T${time}`);
-          if (Number.isNaN(local.getTime())) throw new Error("Choose a valid date and time");
+          if (Number.isNaN(local.getTime())) throw new UserFacingError("Choose a valid date and time");
           schedule = { execute_at: local.toISOString() };
         } else {
           const value = Number(form.get("delay_value"));
           const unit = String(form.get("delay_unit"));
-          if (!Number.isFinite(value) || value <= 0) throw new Error("Delay must be greater than zero");
+          if (!Number.isFinite(value) || value <= 0) throw new UserFacingError("Delay must be greater than zero");
           schedule = { delay: { [unit]: value } };
         }
         await createJob(this.hass, { ...common, ...schedule, conflict_mode: String(form.get("conflict_mode") ?? "keep_all") });
@@ -378,6 +384,11 @@ export class DeferredActionsPanel extends LitElement {
     const action = this.visualActions[actionIndex];
     if (!action) return;
     this.updateAction(actionIndex, { data: action.data.map((entry, itemIndex) => itemIndex === dataIndex ? { ...entry, ...patch } : entry) });
+  }
+
+  private setDataType(actionIndex: number, dataIndex: number, type: DataValueType): void {
+    const entry = this.visualActions[actionIndex]?.data[dataIndex];
+    if (entry) this.updateData(actionIndex, dataIndex, dataEntryWithType(entry, type));
   }
 
   private updateCondition(index: number, condition: VisualCondition): void {
@@ -403,9 +414,9 @@ export class DeferredActionsPanel extends LitElement {
     }
     try {
       const loaded = load(this.actionYaml);
-      if (!Array.isArray(loaded)) throw new Error("Action YAML must be a list");
+      if (!Array.isArray(loaded)) throw new UserFacingError("Action YAML must be a list");
       const visual = sequenceToVisual(loaded as Record<string, unknown>[]);
-      if (!visual) throw new Error("This sequence uses advanced features that the visual editor cannot represent safely.");
+      if (!visual) throw new UserFacingError("This sequence uses advanced features that the visual editor cannot represent safely.");
       this.visualActions = visual;
       this.editor = { ...this.editor!, mode: "visual" };
     } catch (error) { this.setError(error); }
@@ -419,9 +430,9 @@ export class DeferredActionsPanel extends LitElement {
     }
     try {
       const loaded = this.conditionsYaml.trim() ? load(this.conditionsYaml) : [];
-      if (!Array.isArray(loaded)) throw new Error("Conditions YAML must be a list");
+      if (!Array.isArray(loaded)) throw new UserFacingError("Conditions YAML must be a list");
       const visual = conditionsToVisual(loaded as Record<string, unknown>[]);
-      if (!visual) throw new Error("These conditions use advanced options that the visual editor cannot represent safely.");
+      if (!visual) throw new UserFacingError("These conditions use advanced options that the visual editor cannot represent safely.");
       this.visualConditions = visual;
       this.conditionMode = "visual";
     } catch (error) { this.setError(error); }
@@ -498,7 +509,7 @@ export class DeferredActionsPanel extends LitElement {
   }
 
   static styles = css`
-    :host{display:block;color:var(--primary-text-color);background:var(--primary-background-color);min-height:100vh}ha-card{max-width:980px;margin:24px auto;padding:24px;background:var(--card-background-color);box-sizing:border-box}.top{display:flex;justify-content:space-between;align-items:center;gap:16px}.top h1{margin:0;font-size:28px}.create-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}button{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid var(--divider-color);border-radius:10px;padding:9px 12px;background:var(--secondary-background-color);color:var(--primary-text-color);cursor:pointer}button.primary{background:var(--primary-color);color:var(--text-primary-color);border-color:var(--primary-color)}button.danger{color:var(--error-color)}button.warning{color:var(--warning-color)}button.quiet,button.icon,button.link{background:none}button.icon{padding:8px;border:0}button.link{border:0;color:var(--primary-color);padding:4px}button:disabled{opacity:.5}nav{display:flex;align-items:end;gap:4px;overflow:auto;border-bottom:1px solid var(--divider-color);margin-top:20px}nav button{border:0;background:none;border-radius:0}nav button span{min-width:20px;padding:2px 6px;border-radius:999px;background:var(--secondary-background-color);font-size:12px}nav button.active{color:var(--primary-color);border-bottom:3px solid var(--primary-color)}.next{display:flex;align-items:center;gap:8px;padding:12px 4px;color:var(--secondary-text-color)}.next strong{color:var(--primary-text-color)}.next small{margin-left:auto}main{display:flex;flex-direction:column;border-top:1px solid var(--divider-color)}.job{position:relative;display:grid;grid-template-columns:auto 1fr auto;gap:14px;align-items:center;padding:16px 4px;border-bottom:1px solid var(--divider-color);cursor:pointer}.job:hover{background:var(--secondary-background-color)}.job-icon{color:var(--primary-color)}.job-head{display:flex;align-items:center;gap:8px}.job h3{margin:0;font-size:16px}.job p{margin:5px 0 0;color:var(--secondary-text-color)}.time{color:var(--secondary-text-color);font-size:13px;margin-top:4px}.status{font-size:12px;border-radius:999px;padding:3px 7px;background:var(--secondary-background-color);text-transform:capitalize}.status.failed{color:var(--error-color)}.row-actions{display:flex;align-items:center;gap:4px}.row-actions ha-icon{--mdc-icon-size:18px}.menu-wrap{position:relative}.menu{position:absolute;z-index:4;right:0;top:100%;display:flex;flex-direction:column;min-width:210px;padding:6px;background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:12px;box-shadow:var(--ha-card-box-shadow,0 4px 14px rgba(0,0,0,.2))}.menu button{justify-content:flex-start;border:0;background:none}.error,.banner{color:var(--error-color);padding:10px;background:color-mix(in srgb,var(--error-color) 10%,transparent);border-radius:10px}.error.compact{margin-top:8px}.banner{display:flex;justify-content:space-between;margin:12px 0}.banner details{color:var(--secondary-text-color);font-size:12px}.empty{text-align:center;padding:56px;color:var(--secondary-text-color)}.empty ha-icon{--mdc-icon-size:48px}.overlay{position:fixed;z-index:10;inset:0;background:rgba(0,0,0,.48);display:grid;place-items:center;padding:16px}.dialog{width:min(620px,100%);max-height:90vh;overflow:auto;background:var(--card-background-color);border-radius:16px;padding:20px;box-sizing:border-box}.dialog.wide{width:min(820px,100%)}.dialog.small{width:min(480px,100%)}.dialog header,.dialog footer,.section-head{display:flex;justify-content:space-between;align-items:center;gap:8px}.dialog header h2,.section-head h3{margin:0}.dialog header>div{display:flex;align-items:center;gap:10px}.dialog label{display:flex;flex-direction:column;gap:6px;margin:14px 0}.dialog input,.dialog textarea,.dialog select{font:inherit;padding:10px;border:1px solid var(--divider-color);border-radius:8px;color:var(--primary-text-color);background:var(--primary-background-color)}.dialog textarea{min-height:70px}.dialog textarea.yaml{min-height:260px;font-family:monospace}.dialog textarea.small-yaml{min-height:150px}.dialog footer{margin-top:20px;justify-content:flex-end}.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}fieldset,.action-editor,.advanced,.normal-options{border:1px solid var(--divider-color);border-radius:12px;padding:14px;margin-top:16px}.segmented,.delay-row,.chips,.detail-actions{display:flex;gap:8px}.creation-kind{margin:16px 0}.segmented button{flex:1}.segmented .active{border-color:var(--primary-color);color:var(--primary-color)}.delay-row input{flex:1;min-width:0}.delay-row select{min-width:130px}.chips{flex-wrap:wrap;margin-top:10px}.chips button{padding:6px 9px}.advanced summary,details summary{cursor:pointer;font-weight:600}.visual-card{border:1px solid var(--divider-color);border-radius:10px;padding:12px;margin:12px 0;background:var(--primary-background-color)}.data-row{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;margin:8px 0}.weekdays{display:flex;flex-wrap:wrap;gap:8px}.weekdays label{flex-direction:row;margin:0;padding:7px 9px;border:1px solid var(--divider-color);border-radius:8px}.preview{display:flex;gap:12px;align-items:center;padding:14px;margin-top:16px;border-radius:12px;background:color-mix(in srgb,var(--primary-color) 9%,transparent)}.preview div{display:flex;flex-direction:column;gap:3px}.timeline{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:12px}.timeline div{display:flex;flex-direction:column;padding:12px;border-radius:10px;background:var(--secondary-background-color)}.timeline span{color:var(--secondary-text-color);font-size:12px}.detail-summary{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:18px 0}.detail-summary>div{display:flex;flex-direction:column;gap:4px;padding:14px;border:1px solid var(--divider-color);border-radius:12px}.detail-summary span,.detail-summary small{color:var(--secondary-text-color)}details{margin-top:14px}dl{display:grid;grid-template-columns:minmax(130px,auto) 1fr;gap:8px 16px}dt{font-weight:600}dd{margin:0;overflow-wrap:anywhere}pre{padding:12px;overflow:auto;background:var(--secondary-background-color);border-radius:10px;white-space:pre-wrap}@media(max-width:700px){ha-card{margin:0;padding:16px;min-height:100vh;border-radius:0}.top{align-items:flex-start;flex-direction:column}.create-actions{width:100%}.create-actions button{flex:1}.top h1{font-size:24px}.next{flex-wrap:wrap}.next small{width:100%;margin-left:32px}.job{grid-template-columns:auto 1fr}.row-actions{grid-column:2}.row-actions .quiet{flex:1}.overlay{padding:0}.dialog{width:100%;height:100%;max-height:none;border-radius:0}.two,.detail-summary,.timeline{grid-template-columns:1fr}.timeline>ha-icon{transform:rotate(90deg);justify-self:center}.data-row{grid-template-columns:1fr auto}.data-row input+input{grid-column:1}.data-row button{grid-column:2;grid-row:1/3}.creation-kind{flex-direction:column}dl{grid-template-columns:1fr}dd{margin-bottom:8px}}
+    :host{display:block;color:var(--primary-text-color);background:var(--primary-background-color);min-height:100vh}ha-card{max-width:980px;margin:24px auto;padding:24px;background:var(--card-background-color);box-sizing:border-box}.top{display:flex;justify-content:space-between;align-items:center;gap:16px}.top h1{margin:0;font-size:28px}.create-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}button{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid var(--divider-color);border-radius:10px;padding:9px 12px;background:var(--secondary-background-color);color:var(--primary-text-color);cursor:pointer}button.primary{background:var(--primary-color);color:var(--text-primary-color);border-color:var(--primary-color)}button.danger{color:var(--error-color)}button.warning{color:var(--warning-color)}button.quiet,button.icon,button.link{background:none}button.icon{padding:8px;border:0}button.link{border:0;color:var(--primary-color);padding:4px}button:disabled{opacity:.5}nav{display:flex;align-items:end;gap:4px;overflow:auto;border-bottom:1px solid var(--divider-color);margin-top:20px}nav button{border:0;background:none;border-radius:0}nav button span{min-width:20px;padding:2px 6px;border-radius:999px;background:var(--secondary-background-color);font-size:12px}nav button.active{color:var(--primary-color);border-bottom:3px solid var(--primary-color)}.next{display:flex;align-items:center;gap:8px;padding:12px 4px;color:var(--secondary-text-color)}.next strong{color:var(--primary-text-color)}.next small{margin-left:auto}main{display:flex;flex-direction:column;border-top:1px solid var(--divider-color)}.job{position:relative;display:grid;grid-template-columns:auto 1fr auto;gap:14px;align-items:center;padding:16px 4px;border-bottom:1px solid var(--divider-color);cursor:pointer}.job:hover{background:var(--secondary-background-color)}.job-icon{color:var(--primary-color)}.job-head{display:flex;align-items:center;gap:8px}.job h3{margin:0;font-size:16px}.job p{margin:5px 0 0;color:var(--secondary-text-color)}.time{color:var(--secondary-text-color);font-size:13px;margin-top:4px}.status{font-size:12px;border-radius:999px;padding:3px 7px;background:var(--secondary-background-color);text-transform:capitalize}.status.failed{color:var(--error-color)}.row-actions{display:flex;align-items:center;gap:4px}.row-actions ha-icon{--mdc-icon-size:18px}.menu-wrap{position:relative}.menu{position:absolute;z-index:4;right:0;top:100%;display:flex;flex-direction:column;min-width:210px;padding:6px;background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:12px;box-shadow:var(--ha-card-box-shadow,0 4px 14px rgba(0,0,0,.2))}.menu button{justify-content:flex-start;border:0;background:none}.error,.banner{color:var(--error-color);padding:10px;background:color-mix(in srgb,var(--error-color) 10%,transparent);border-radius:10px}.error.compact{margin-top:8px}.banner{display:flex;justify-content:space-between;margin:12px 0}.banner details{color:var(--secondary-text-color);font-size:12px}.empty{text-align:center;padding:56px;color:var(--secondary-text-color)}.empty ha-icon{--mdc-icon-size:48px}.overlay{position:fixed;z-index:10;inset:0;background:rgba(0,0,0,.48);display:grid;place-items:center;padding:16px}.dialog{width:min(620px,100%);max-height:90vh;overflow:auto;background:var(--card-background-color);border-radius:16px;padding:20px;box-sizing:border-box}.dialog.wide{width:min(820px,100%)}.dialog.small{width:min(480px,100%)}.dialog header,.dialog footer,.section-head{display:flex;justify-content:space-between;align-items:center;gap:8px}.dialog header h2,.section-head h3{margin:0}.dialog header>div{display:flex;align-items:center;gap:10px}.dialog label{display:flex;flex-direction:column;gap:6px;margin:14px 0}.dialog input,.dialog textarea,.dialog select{font:inherit;padding:10px;border:1px solid var(--divider-color);border-radius:8px;color:var(--primary-text-color);background:var(--primary-background-color)}.dialog textarea{min-height:70px}.dialog textarea.yaml{min-height:260px;font-family:monospace}.dialog textarea.small-yaml{min-height:150px}.dialog footer{margin-top:20px;justify-content:flex-end}.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}fieldset,.action-editor,.advanced,.normal-options{border:1px solid var(--divider-color);border-radius:12px;padding:14px;margin-top:16px}.segmented,.delay-row,.chips,.detail-actions{display:flex;gap:8px}.creation-kind{margin:16px 0}.segmented button{flex:1}.segmented .active{border-color:var(--primary-color);color:var(--primary-color)}.delay-row input{flex:1;min-width:0}.delay-row select{min-width:130px}.chips{flex-wrap:wrap;margin-top:10px}.chips button{padding:6px 9px}.advanced summary,details summary{cursor:pointer;font-weight:600}.visual-card{border:1px solid var(--divider-color);border-radius:10px;padding:12px;margin:12px 0;background:var(--primary-background-color)}.data-row{display:grid;grid-template-columns:minmax(120px,1fr) 110px minmax(140px,1fr) auto;gap:8px;align-items:center;margin:8px 0}.null-value{padding:10px;color:var(--secondary-text-color);font-style:italic}.weekdays{display:flex;flex-wrap:wrap;gap:8px}.weekdays label{flex-direction:row;margin:0;padding:7px 9px;border:1px solid var(--divider-color);border-radius:8px}.preview{display:flex;gap:12px;align-items:center;padding:14px;margin-top:16px;border-radius:12px;background:color-mix(in srgb,var(--primary-color) 9%,transparent)}.preview div{display:flex;flex-direction:column;gap:3px}.timeline{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:12px}.timeline div{display:flex;flex-direction:column;padding:12px;border-radius:10px;background:var(--secondary-background-color)}.timeline span{color:var(--secondary-text-color);font-size:12px}.detail-summary{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:18px 0}.detail-summary>div{display:flex;flex-direction:column;gap:4px;padding:14px;border:1px solid var(--divider-color);border-radius:12px}.detail-summary span,.detail-summary small{color:var(--secondary-text-color)}details{margin-top:14px}dl{display:grid;grid-template-columns:minmax(130px,auto) 1fr;gap:8px 16px}dt{font-weight:600}dd{margin:0;overflow-wrap:anywhere}pre{padding:12px;overflow:auto;background:var(--secondary-background-color);border-radius:10px;white-space:pre-wrap}@media(max-width:700px){ha-card{margin:0;padding:16px;min-height:100vh;border-radius:0}.top{align-items:flex-start;flex-direction:column}.create-actions{width:100%}.create-actions button{flex:1}.top h1{font-size:24px}.next{flex-wrap:wrap}.next small{width:100%;margin-left:32px}.job{grid-template-columns:auto 1fr}.row-actions{grid-column:2}.row-actions .quiet{flex:1}.overlay{padding:0}.dialog{width:100%;height:100%;max-height:none;border-radius:0}.two,.detail-summary,.timeline{grid-template-columns:1fr}.timeline>ha-icon{transform:rotate(90deg);justify-self:center}.data-row{grid-template-columns:1fr auto}.data-row input,.data-row select,.data-row .null-value{grid-column:1}.data-row button{grid-column:2;grid-row:1/4}.creation-kind{flex-direction:column}dl{grid-template-columns:1fr}dd{margin-bottom:8px}}
   `;
 }
 

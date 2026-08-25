@@ -1,4 +1,5 @@
 export type Primitive = string | number | boolean | null;
+export type DataValueType = "text" | "number" | "boolean" | "null";
 
 export interface VisualTarget {
   entity_id?: string | string[];
@@ -8,7 +9,12 @@ export interface VisualTarget {
   label_id?: string | string[];
 }
 
-export interface DataEntry { key: string; value: Primitive }
+export interface DataEntry {
+  key: string;
+  type: DataValueType;
+  value: Primitive;
+  raw?: string;
+}
 
 export interface VisualAction {
   action: string;
@@ -60,14 +66,14 @@ export const sequenceToVisual = (sequence: Record<string, unknown>[]): VisualAct
     const entries = Object.entries(dataRaw as Record<string, unknown>);
     if (entries.some(([, value]) => value !== null && !["string", "number", "boolean"].includes(typeof value))) return undefined;
     const scalarTargets = (["entity_id", "device_id", "area_id", "floor_id", "label_id"] as const).filter((key) => typeof targetObject[key] === "string");
-    result.push({ action, syntax: raw.service !== undefined ? "service" : "action", target, scalarTargets, data: entries.map(([key, value]) => ({ key, value: value as Primitive })) });
+    result.push({ action, syntax: raw.service !== undefined ? "service" : "action", target, scalarTargets, data: entries.map(([key, value]) => dataEntry(key, value as Primitive)) });
   }
   return result;
 };
 
 export const visualToSequence = (actions: VisualAction[]): Record<string, unknown>[] => actions.map((item) => {
   const target = Object.fromEntries(Object.entries(item.target).filter(([, value]) => value?.length).map(([key, value]) => [key, item.scalarTargets?.includes(key as keyof VisualTarget) && Array.isArray(value) && value.length === 1 ? value[0] : value]));
-  const data = Object.fromEntries(item.data.filter((entry) => entry.key.trim()).map((entry) => [entry.key.trim(), entry.value]));
+  const data = Object.fromEntries(item.data.filter((entry) => entry.key.trim()).map((entry) => [entry.key.trim(), dataEntryValue(entry)]));
   return {
     [item.syntax ?? "action"]: item.action,
     ...(Object.keys(target).length ? { target } : {}),
@@ -129,13 +135,35 @@ export const visualToConditions = (visual: VisualConditions): Record<string, unk
   return (visual.operator === "or" || visual.grouped) && conditions.length ? [{ condition: visual.operator, conditions }] : conditions;
 };
 
-export const parsePrimitive = (value: string): Primitive => {
-  const trimmed = value.trim();
-  if (trimmed === "true") return true;
-  if (trimmed === "false") return false;
-  if (trimmed === "null") return null;
-  if (trimmed !== "" && Number.isFinite(Number(trimmed))) return Number(trimmed);
+export class UserFacingError extends Error {}
+
+export const dataTypeFor = (value: Primitive): DataValueType => {
+  if (value === null) return "null";
+  return typeof value === "number" ? "number" : typeof value === "boolean" ? "boolean" : "text";
+};
+
+export const dataEntry = (key: string, value: Primitive): DataEntry => ({
+  key,
+  type: dataTypeFor(value),
+  value,
+  ...(typeof value === "string" || typeof value === "number" ? { raw: String(value) } : {}),
+});
+
+export const dataEntryValue = (entry: DataEntry): Primitive => {
+  if (entry.type === "null") return null;
+  if (entry.type === "boolean") return entry.value === true;
+  if (entry.type === "text") return entry.raw ?? String(entry.value ?? "");
+  const value = Number(entry.raw ?? entry.value);
+  if (!Number.isFinite(value)) throw new UserFacingError(`Enter a finite number for “${entry.key || "this data field"}”.`);
   return value;
+};
+
+export const dataEntryWithType = (entry: DataEntry, type: DataValueType): DataEntry => {
+  const raw = entry.raw ?? String(entry.value ?? "");
+  if (type === "text") return { ...entry, type, value: raw, raw };
+  if (type === "number") return { ...entry, type, raw };
+  if (type === "boolean") return { ...entry, type, value: entry.value === true || raw === "true" };
+  return { ...entry, type, value: null, raw: undefined };
 };
 
 export const friendlyError = (error: unknown): { message: string; details: string } => {
@@ -147,4 +175,10 @@ export const friendlyError = (error: unknown): { message: string; details: strin
   if (lower.includes("condition")) return { message: "One or more conditions are incomplete or invalid.", details };
   if (lower.includes("sequence") || lower.includes("action")) return { message: "The action sequence is incomplete or invalid.", details };
   return { message: "Home Assistant couldn’t save this deferred action.", details };
+};
+
+export const presentError = (error: unknown): { message: string; details?: string } => {
+  if (error instanceof UserFacingError) return { message: error.message };
+  const friendly = friendlyError(error);
+  return { message: friendly.message, ...(friendly.details === friendly.message ? {} : { details: friendly.details }) };
 };
