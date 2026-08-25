@@ -1,14 +1,26 @@
 import { LitElement, css, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { dump, load } from "js-yaml";
-import { createJob, listJobs, operateJob, subscribeJobs, updateJob } from "./api";
+import { createJob, listJobs, operateJob, runFor, subscribeJobs, updateJob } from "./api";
+import {
+  conditionsToVisual, friendlyError, parsePrimitive, sequenceToVisual, visualToConditions, visualToSequence,
+  type VisualAction, type VisualCondition, type VisualConditions, type VisualTarget,
+} from "./editor-model";
 import { effectiveOverdueLabel, isHistoryStatus, localDate, relativeTime, resolutionHints, snoozePresets } from "./format";
 import type { DeferredJob, HomeAssistant, PushEvent, QueueSummary } from "./types";
 
 type Tab = "Pending" | "Paused" | "Failed" | "History" | "All";
-type EditorMode = "simple" | "advanced";
+type EditorMode = "visual" | "yaml";
 type ScheduleMode = "delay" | "absolute";
+type CreationKind = "later" | "run_for";
 type QuickDialog = { job: DeferredJob; kind: "reschedule" | "extend" | "snooze" | "duplicate" };
+const RUN_FOR_INVERSES: Record<string, string> = {
+  "light.turn_on": "light.turn_off",
+  "switch.turn_on": "switch.turn_off",
+  "fan.turn_on": "fan.turn_off",
+  "input_boolean.turn_on": "input_boolean.turn_off",
+  "media_player.media_play": "media_player.media_pause",
+};
 
 @customElement("deferred-actions-panel")
 export class DeferredActionsPanel extends LitElement {
@@ -18,10 +30,21 @@ export class DeferredActionsPanel extends LitElement {
   @state() private tab: Tab = "Pending";
   @state() private selected?: DeferredJob;
   @state() private editor?: { job?: DeferredJob; mode: EditorMode };
+  @state() private creationKind: CreationKind = "later";
   @state() private scheduleMode: ScheduleMode = "delay";
-  @state() private simpleAction = "light.turn_off";
-  @state() private simpleEntity = "";
-  @state() private advancedOpen = false;
+  @state() private visualActions: VisualAction[] = [];
+  @state() private actionYaml = "";
+  @state() private conditionMode: EditorMode = "visual";
+  @state() private visualConditions: VisualConditions = { operator: "and", items: [] };
+  @state() private conditionsYaml = "";
+  @state() private runForTarget: VisualTarget = {};
+  @state() private runForStart = "light.turn_on";
+  @state() private runForEnd = "light.turn_off";
+  @state() private jobKey = "";
+  @state() private previewDelay = 20;
+  @state() private previewUnit = "minutes";
+  @state() private confirmAction?: { operation: string; job: DeferredJob };
+  @state() private errorDetails?: string;
   @state() private menuJobId?: string;
   @state() private quickDialog?: QuickDialog;
   @state() private error?: string;
@@ -52,7 +75,7 @@ export class DeferredActionsPanel extends LitElement {
       const result = await listJobs(this.hass);
       this.jobs = result.jobs;
       this.recalculate();
-    } catch (error) { this.error = String(error); }
+    } catch (error) { this.setError(error); }
   }
 
   private handlePush(event: PushEvent): void {
@@ -88,25 +111,53 @@ export class DeferredActionsPanel extends LitElement {
 
   private async operate(operation: string, job: DeferredJob, data: Record<string, unknown> = {}): Promise<void> {
     this.menuJobId = undefined;
-    if (["cancel", "delete", "execute_now"].includes(operation) && !window.confirm(`${operation.replace("_", " ")} “${job.name}”?`)) return;
+    if (["cancel", "delete", "execute_now"].includes(operation)) {
+      this.confirmAction = { operation, job };
+      return;
+    }
+    await this.performOperation(operation, job, data);
+  }
+
+  private async performOperation(operation: string, job: DeferredJob, data: Record<string, unknown> = {}): Promise<void> {
     this.busy = true;
     this.error = undefined;
+    this.errorDetails = undefined;
     try {
       await operateJob(this.hass, operation, job.id, data);
       if (operation === "delete") this.selected = undefined;
-    } catch (error) { this.error = String(error); }
+    } catch (error) { this.setError(error); }
     finally { this.busy = false; }
   }
 
+  private setError(error: unknown): void {
+    const friendly = friendlyError(error);
+    this.error = friendly.message;
+    this.errorDetails = friendly.details === friendly.message ? undefined : friendly.details;
+  }
+
   private openEditor(job?: DeferredJob): void {
-    const first = job?.sequence[0] as { action?: unknown; target?: { entity_id?: unknown } } | undefined;
-    const entity = first?.target?.entity_id;
-    this.simpleAction = typeof first?.action === "string" ? first.action : "light.turn_off";
-    this.simpleEntity = typeof entity === "string" ? entity : "";
+    const sequence = job?.sequence ?? [{ action: "light.turn_off", target: {} }];
+    const visual = sequenceToVisual(sequence);
+    this.visualActions = visual ?? [];
+    this.actionYaml = dump(sequence, { noRefs: true });
+    const visualConditions = conditionsToVisual(job?.conditions ?? []);
+    this.visualConditions = visualConditions ?? { operator: "and", items: [] };
+    this.conditionMode = visualConditions ? "visual" : "yaml";
+    this.conditionsYaml = job?.conditions.length ? dump(job.conditions, { noRefs: true }) : "";
     this.scheduleMode = "delay";
-    this.advancedOpen = false;
-    this.editor = { job, mode: job ? "advanced" : "simple" };
+    this.creationKind = "later";
+    this.jobKey = job?.job_key ?? "";
+    this.previewDelay = 20;
+    this.previewUnit = "minutes";
+    this.editor = { job, mode: visual ? "visual" : "yaml" };
     this.menuJobId = undefined;
+    this.error = undefined;
+    this.errorDetails = undefined;
+  }
+
+  private openRunFor(): void {
+    this.openEditor();
+    this.creationKind = "run_for";
   }
 
   private primaryOperation(job: DeferredJob): { label: string; icon: string; operation: string } | undefined {
@@ -162,8 +213,8 @@ export class DeferredActionsPanel extends LitElement {
       <details><summary>Additional information</summary><dl>
         ${Object.entries({
           "Job ID": job.id, Status: job.status, "Scheduled UTC": job.execute_at,
-          "Valid until": job.valid_until_local ? `${localDate(job.valid_until_local)} (${job.valid_until})` : "—",
-          Conditions: job.has_conditions ? `Yes — ${job.condition_failure} if false` : "None",
+          "Don’t run after": job.valid_until_local ? `${localDate(job.valid_until_local)} (${job.valid_until})` : "—",
+          Conditions: job.has_conditions ? `Yes — ${job.condition_failure === "skip" ? "skip this run" : job.condition_failure === "cancel" ? "cancel the action" : "mark as failed"} if not met` : "None",
           "Overdue behavior": effectiveOverdueLabel(job),
           Created: job.created_at, Modified: job.modified_at, Completed: job.completed_at || "—",
           Source: job.source, "Job key": job.job_key || "—", Tags: job.tags.join(", ") || "—",
@@ -181,32 +232,75 @@ export class DeferredActionsPanel extends LitElement {
 
   private renderEditor() {
     const job = this.editor?.job;
-    return html`<div class="overlay"><form class="dialog" @submit=${(event: SubmitEvent) => this.saveEditor(event)}>
-      <header><h2>${job ? "Edit deferred action" : "Add deferred action"}</h2><button type="button" class="icon" title="Close" @click=${() => { this.editor = undefined; }}><ha-icon icon="mdi:close"></ha-icon></button></header>
+    const runForEditor = !job && this.creationKind === "run_for";
+    return html`<div class="overlay"><form class="dialog wide" @submit=${(event: SubmitEvent) => this.saveEditor(event)}>
+      <header><h2>${job ? "Edit deferred action" : runForEditor ? "Run something for a while" : "Do something later"}</h2><button type="button" class="icon" title="Close" @click=${() => { this.editor = undefined; }}><ha-icon icon="mdi:close"></ha-icon></button></header>
+      ${!job ? html`<div class="segmented creation-kind"><button type="button" class=${this.creationKind === "later" ? "active" : ""} @click=${() => { this.creationKind = "later"; }}>Do something later</button><button type="button" class=${runForEditor ? "active" : ""} @click=${() => { this.creationKind = "run_for"; }}>Run something for a while</button></div>` : nothing}
       <label>Name<input name="name" required .value=${job?.name ?? ""} placeholder="Turn off office heater"></label>
-      ${job ? nothing : html`<fieldset><legend>When</legend><div class="segmented"><button type="button" class=${this.scheduleMode === "delay" ? "active" : ""} @click=${() => { this.scheduleMode = "delay"; }}>After a delay</button><button type="button" class=${this.scheduleMode === "absolute" ? "active" : ""} @click=${() => { this.scheduleMode = "absolute"; }}>At a date and time</button></div>
-        ${this.scheduleMode === "delay" ? html`<div class="delay-row"><input name="delay_value" type="number" min="1" value="20"><select name="delay_unit"><option value="minutes">minutes</option><option value="hours">hours</option><option value="days">days</option></select></div><div class="chips">${[5,15,30,60].map((minutes) => html`<button type="button" @click=${(event: Event) => { const form = (event.currentTarget as HTMLElement).closest("form")!; (form.elements.namedItem("delay_value") as HTMLInputElement).value = String(minutes); (form.elements.namedItem("delay_unit") as HTMLSelectElement).value = "minutes"; }}>${minutes < 60 ? `${minutes} min` : "1 hour"}</button>`)}</div>` : html`<div class="two"><label>Date<input name="date" type="date" required></label><label>Time<input name="time" type="time" required></label></div>`}
-      </fieldset>`}
-      <section class="action-editor"><div class="section-head"><h3>Action</h3><button type="button" class="link" @click=${() => { this.editor = { ...this.editor!, mode: this.editor?.mode === "simple" ? "advanced" : "simple" }; }}>${this.editor?.mode === "simple" ? "Edit in YAML" : "Use simple editor"}</button></div>
-      ${this.editor?.mode === "simple" ? html`
-        <label>Service<ha-service-picker .hass=${this.hass} .value=${this.simpleAction} @value-changed=${(event: CustomEvent<{ value: string }>) => { this.simpleAction = event.detail.value; }}></ha-service-picker></label>
-        <label>Entity<ha-entity-picker .hass=${this.hass} .value=${this.simpleEntity} .allowCustomEntity=${true} @value-changed=${(event: CustomEvent<{ value: string }>) => { this.simpleEntity = event.detail.value; }}></ha-entity-picker></label>
-      ` : html`<label>Action sequence YAML<textarea class="yaml" name="yaml" required>${dump(job?.sequence ?? [{ action: "light.turn_off", target: { entity_id: "light.porch" } }], { noRefs: true })}</textarea></label>`}
-      </section>
-      <details class="advanced" ?open=${this.advancedOpen} @toggle=${(event: Event) => { this.advancedOpen = (event.currentTarget as HTMLDetailsElement).open; }}><summary>Advanced options</summary>
-        <label>Description<textarea name="description">${job?.description ?? ""}</textarea></label>
-        <label>Job key<input name="job_key" .value=${job?.job_key ?? ""}></label>
-        <label>Tags (comma separated)<input name="tags" .value=${job?.tags.join(", ") ?? ""}></label>
+      ${runForEditor ? this.renderRunForFields() : html`
+        ${job ? nothing : this.renderScheduleFields()}
+        <section class="action-editor"><div class="section-head"><h3>Actions</h3><button type="button" class="link" @click=${() => this.switchActionMode()}>${this.editor?.mode === "visual" ? "Edit in YAML" : "Use visual editor"}</button></div>
+          ${this.editor?.mode === "visual" ? this.renderVisualActions() : html`<label>Action sequence YAML<textarea class="yaml" name="yaml" .value=${this.actionYaml} @input=${(event: InputEvent) => { this.actionYaml = (event.currentTarget as HTMLTextAreaElement).value; }}></textarea><small>Advanced sequences such as choose, repeat, parallel, waits, and templates stay here.</small></label>`}
+        </section>
+        ${this.renderNormalOptions(job)}
+      `}
+      <details class="advanced"><summary>Developer and automation options</summary>
+        <label>Job key<input name="job_key" .value=${this.jobKey} @input=${(event: InputEvent) => { this.jobKey = (event.currentTarget as HTMLInputElement).value; }}><small>Optional stable identifier for automations.</small></label>
+        ${!job && this.jobKey.trim() ? html`<label>When another action has this job key<select name="conflict_mode"><option value="keep_all">Keep both actions</option><option value="replace_same_key">Replace the existing action</option><option value="cancel_same_key">Cancel the existing action</option><option value="reject_same_key">Do not create this action</option></select></label>` : nothing}
+        <label>Tags<input name="tags" .value=${job?.tags.join(", ") ?? ""} placeholder="heating, office"><small>Separate tags with commas.</small></label>
         <label>Resolution entity hints<ha-entity-picker .hass=${this.hass} .value=${resolutionHints(job)[0] ?? ""} .allowCustomEntity=${true} @value-changed=${(event: CustomEvent<{ value: string }>) => { const input = (event.currentTarget as HTMLElement).parentElement?.querySelector("input[name=target_entities]") as HTMLInputElement | null; if (input) input.value = event.detail.value; }}></ha-entity-picker><input name="target_entities" type="hidden" .value=${resolutionHints(job).join(", ")}><small>Used to find this job later; it does not change the action target.</small></label>
-        ${job ? nothing : html`<label>When another action has this job key<select name="conflict_mode"><option value="keep_all">Keep both actions</option><option value="replace_same_key">Replace the existing action</option><option value="cancel_same_key">Cancel the existing action</option><option value="reject_same_key">Do not create this action</option></select></label>`}
-        <label>Execution conditions YAML<textarea class="yaml small-yaml" name="conditions_yaml">${job?.conditions.length ? dump(job.conditions, { noRefs: true }) : ""}</textarea><small>Normal Home Assistant conditions, evaluated immediately before the action.</small></label>
-        <label>If conditions are false<select name="condition_failure"><option value="skip" ?selected=${!job || job.condition_failure === "skip"}>Skip</option><option value="cancel" ?selected=${job?.condition_failure === "cancel"}>Cancel</option><option value="fail" ?selected=${job?.condition_failure === "fail"}>Fail</option></select></label>
-        <label>Valid until<input name="valid_until" type="datetime-local" .value=${job?.valid_until_local?.slice(0, 16) ?? ""}><small>The action will never begin at or after this cutoff.</small></label>
-        <label>Overdue recovery<select name="overdue_policy"><option value="" ?selected=${!job?.overdue_policy}>Use integration default</option><option value="execute" ?selected=${job?.overdue_policy === "execute"}>Execute</option><option value="skip" ?selected=${job?.overdue_policy === "skip"}>Skip as missed</option><option value="execute_within_grace" ?selected=${job?.overdue_policy === "execute_within_grace"}>Execute within grace</option></select></label>
-        <label>Job-specific grace (minutes)<input name="overdue_grace_minutes" type="number" min="0" .value=${job?.overdue_grace ? String(job.effective_overdue_grace_minutes) : ""} placeholder="Use integration default"></label>
       </details>
+      <section class="preview"><ha-icon icon="mdi:eye-outline"></ha-icon><div><strong>Preview</strong><span>${this.editorPreview(job)}</span></div></section>
       <footer><button type="button" @click=${() => { this.editor = undefined; }}>Cancel</button><button class="primary" ?disabled=${this.busy}>${job ? "Save" : "Create"}</button></footer>
     </form></div>`;
+  }
+
+  private renderScheduleFields() {
+    return html`<fieldset><legend>When</legend><div class="segmented"><button type="button" class=${this.scheduleMode === "delay" ? "active" : ""} @click=${() => { this.scheduleMode = "delay"; }}>After a delay</button><button type="button" class=${this.scheduleMode === "absolute" ? "active" : ""} @click=${() => { this.scheduleMode = "absolute"; }}>At a date and time</button></div>
+      ${this.scheduleMode === "delay" ? html`<div class="delay-row"><input name="delay_value" type="number" min="1" .value=${String(this.previewDelay)} @input=${(event: InputEvent) => { this.previewDelay = Number((event.currentTarget as HTMLInputElement).value); }}><select name="delay_unit" .value=${this.previewUnit} @change=${(event: Event) => { this.previewUnit = (event.currentTarget as HTMLSelectElement).value; }}><option value="minutes">minutes</option><option value="hours">hours</option><option value="days">days</option></select></div><div class="chips">${[5,15,30,60].map((minutes) => html`<button type="button" @click=${() => { this.previewDelay = minutes; this.previewUnit = "minutes"; }}>${minutes < 60 ? `${minutes} min` : "1 hour"}</button>`)}</div>` : html`<div class="two"><label>Date<input name="date" type="date" required></label><label>Time<input name="time" type="time" required></label></div>`}
+    </fieldset>`;
+  }
+
+  private renderRunForFields() {
+    return html`<fieldset><legend>Run For</legend>
+      <label>Description<textarea name="description"></textarea></label>
+      <label>Target<ha-target-picker .hass=${this.hass} .value=${this.runForTarget} @value-changed=${(event: CustomEvent<{ value: VisualTarget }>) => { this.runForTarget = event.detail.value; }}></ha-target-picker><small>Choose entities, devices, or areas.</small></label>
+      <div class="two"><label>Start action<ha-service-picker .hass=${this.hass} .value=${this.runForStart} @value-changed=${(event: CustomEvent<{ value: string }>) => { this.runForStart = event.detail.value; this.runForEnd = RUN_FOR_INVERSES[event.detail.value] ?? ""; }}></ha-service-picker></label><label>End action<ha-service-picker .hass=${this.hass} .value=${this.runForEnd} @value-changed=${(event: CustomEvent<{ value: string }>) => { this.runForEnd = event.detail.value; }}></ha-service-picker><small>Suggested only for conservative, known opposite actions; otherwise choose one explicitly.</small></label></div>
+      <label>Duration<div class="delay-row"><input name="delay_value" type="number" min="1" .value=${String(this.previewDelay)} @input=${(event: InputEvent) => { this.previewDelay = Number((event.currentTarget as HTMLInputElement).value); }}><select name="delay_unit" .value=${this.previewUnit} @change=${(event: Event) => { this.previewUnit = (event.currentTarget as HTMLSelectElement).value; }}><option value="minutes">minutes</option><option value="hours">hours</option><option value="days">days</option></select></div></label>
+      <div class="timeline"><div><span>Now</span><strong>${this.actionLabel(this.runForStart, this.runForTarget)}</strong></div><ha-icon icon="mdi:arrow-right"></ha-icon><div><span>After ${this.previewDelay} ${this.previewUnit}</span><strong>${this.actionLabel(this.runForEnd, this.runForTarget)}</strong></div></div>
+    </fieldset>`;
+  }
+
+  private renderVisualActions() {
+    return html`${this.visualActions.map((action, index) => html`<article class="visual-card">
+      <div class="section-head"><strong>Action ${index + 1}</strong>${this.visualActions.length > 1 ? html`<button type="button" class="link danger" @click=${() => { this.visualActions = this.visualActions.filter((_, itemIndex) => itemIndex !== index); }}>Remove</button>` : nothing}</div>
+      <label>Service<ha-service-picker .hass=${this.hass} .value=${action.action} @value-changed=${(event: CustomEvent<{ value: string }>) => this.updateAction(index, { action: event.detail.value })}></ha-service-picker></label>
+      <label>Target<ha-target-picker .hass=${this.hass} .value=${action.target} @value-changed=${(event: CustomEvent<{ value: VisualTarget }>) => this.updateAction(index, { target: event.detail.value })}></ha-target-picker><small>Choose entities, devices, or areas. Leave empty for services that do not need a target.</small></label>
+      <div class="section-head"><strong>Action data</strong><button type="button" class="link" @click=${() => this.updateAction(index, { data: [...action.data, { key: "", value: "" }] })}>Add field</button></div>
+      ${action.data.map((entry, dataIndex) => html`<div class="data-row"><input aria-label="Data field" placeholder="brightness_pct" .value=${entry.key} @input=${(event: InputEvent) => this.updateData(index, dataIndex, { key: (event.currentTarget as HTMLInputElement).value })}><input aria-label="Data value" placeholder="60 or message text" .value=${String(entry.value ?? "")} @input=${(event: InputEvent) => this.updateData(index, dataIndex, { value: parsePrimitive((event.currentTarget as HTMLInputElement).value) })}><button type="button" class="icon" title="Remove data field" @click=${() => this.updateAction(index, { data: action.data.filter((_, itemIndex) => itemIndex !== dataIndex) })}><ha-icon icon="mdi:close"></ha-icon></button></div>`)}
+    </article>`)}<button type="button" @click=${() => { this.visualActions = [...this.visualActions, { action: "", target: {}, data: [] }]; }}><ha-icon icon="mdi:plus"></ha-icon>Add another action</button>`;
+  }
+
+  private renderNormalOptions(job?: DeferredJob) {
+    return html`<section class="normal-options"><h3>Optional settings</h3>
+      <label>Description<textarea name="description">${job?.description ?? ""}</textarea></label>
+      <div class="section-head"><h3>Only run this action if…</h3><button type="button" class="link" @click=${() => this.switchConditionMode()}>${this.conditionMode === "visual" ? "Edit in YAML" : "Use visual editor"}</button></div>
+      ${this.conditionMode === "visual" ? this.renderVisualConditions() : html`<label>Conditions YAML<textarea class="yaml small-yaml" .value=${this.conditionsYaml} @input=${(event: InputEvent) => { this.conditionsYaml = (event.currentTarget as HTMLTextAreaElement).value; }}></textarea><small>Existing and advanced Home Assistant conditions are preserved here.</small></label>`}
+      <label>If the conditions aren’t met<select name="condition_failure"><option value="skip" ?selected=${!job || job.condition_failure === "skip"}>Skip this run and keep it in history</option><option value="cancel" ?selected=${job?.condition_failure === "cancel"}>Cancel the action</option><option value="fail" ?selected=${job?.condition_failure === "fail"}>Mark the action as failed</option></select></label>
+      <label>Don’t run after<input name="valid_until" type="datetime-local" .value=${job?.valid_until_local?.slice(0, 16) ?? ""}><small>The action will never begin at or after this cutoff.</small></label>
+      <label>If Home Assistant was offline when this was due<select name="overdue_policy"><option value="" ?selected=${!job?.overdue_policy}>Use the integration default</option><option value="execute" ?selected=${job?.overdue_policy === "execute"}>Run it when Home Assistant comes back</option><option value="execute_within_grace" ?selected=${job?.overdue_policy === "execute_within_grace"}>Run it only if it is less than the grace period late</option><option value="skip" ?selected=${job?.overdue_policy === "skip"}>Don’t run it</option></select></label>
+      <label>Grace period (minutes)<input name="overdue_grace_minutes" type="number" min="0" .value=${job?.overdue_grace ? String(job.effective_overdue_grace_minutes) : ""} placeholder="Use integration default"><small>Used only for “less than the grace period late”.</small></label>
+    </section>`;
+  }
+
+  private renderVisualConditions() {
+    const weekdays: [string, string][] = [["mon", "Mon"], ["tue", "Tue"], ["wed", "Wed"], ["thu", "Thu"], ["fri", "Fri"], ["sat", "Sat"], ["sun", "Sun"]];
+    return html`<div class="condition-builder">${this.visualConditions.items.length > 1 ? html`<label>Match<select .value=${this.visualConditions.operator} @change=${(event: Event) => { this.visualConditions = { ...this.visualConditions, operator: (event.currentTarget as HTMLSelectElement).value as "and" | "or" }; }}><option value="and">All conditions (AND)</option><option value="or">Any condition (OR)</option></select></label>` : nothing}
+      ${this.visualConditions.items.map((condition, index) => html`<article class="visual-card"><div class="section-head"><select aria-label="Condition type" .value=${condition.type} @change=${(event: Event) => this.changeConditionType(index, (event.currentTarget as HTMLSelectElement).value as VisualCondition["type"])}><option value="state">State</option><option value="numeric_state">Numeric state</option><option value="time">Time / day</option></select><button type="button" class="link danger" @click=${() => { this.visualConditions = { ...this.visualConditions, items: this.visualConditions.items.filter((_, itemIndex) => itemIndex !== index) }; }}>Remove</button></div>
+        ${condition.type === "state" ? html`<label>Entity<ha-entity-picker .hass=${this.hass} .value=${condition.entity_id} .allowCustomEntity=${true} @value-changed=${(event: CustomEvent<{ value: string }>) => this.updateCondition(index, { ...condition, entity_id: event.detail.value })}></ha-entity-picker></label><label>Must be in state<input .value=${condition.state} @input=${(event: InputEvent) => this.updateCondition(index, { ...condition, state: (event.currentTarget as HTMLInputElement).value })}></label>` : nothing}
+        ${condition.type === "numeric_state" ? html`<label>Entity<ha-entity-picker .hass=${this.hass} .value=${condition.entity_id} .allowCustomEntity=${true} @value-changed=${(event: CustomEvent<{ value: string }>) => this.updateCondition(index, { ...condition, entity_id: event.detail.value })}></ha-entity-picker></label><div class="two"><label>Above<input type="number" step="any" .value=${condition.above} @input=${(event: InputEvent) => this.updateCondition(index, { ...condition, above: (event.currentTarget as HTMLInputElement).value })}></label><label>Below<input type="number" step="any" .value=${condition.below} @input=${(event: InputEvent) => this.updateCondition(index, { ...condition, below: (event.currentTarget as HTMLInputElement).value })}></label></div>` : nothing}
+        ${condition.type === "time" ? html`<div class="two"><label>After<input type="time" step="1" .value=${condition.after} @input=${(event: InputEvent) => this.updateCondition(index, { ...condition, after: (event.currentTarget as HTMLInputElement).value })}></label><label>Before<input type="time" step="1" .value=${condition.before} @input=${(event: InputEvent) => this.updateCondition(index, { ...condition, before: (event.currentTarget as HTMLInputElement).value })}></label></div><div class="weekdays">${weekdays.map(([value, label]) => html`<label><input type="checkbox" .checked=${condition.weekdays.includes(value)} @change=${(event: Event) => this.toggleWeekday(index, condition, value, (event.currentTarget as HTMLInputElement).checked)}>${label}</label>`)}</div>` : nothing}
+      </article>`)}<button type="button" @click=${() => { this.visualConditions = { ...this.visualConditions, items: [...this.visualConditions.items, { type: "state", entity_id: "", state: "" }] }; }}><ha-icon icon="mdi:plus"></ha-icon>Add condition</button></div>`;
   }
 
   private async saveEditor(event: SubmitEvent): Promise<void> {
@@ -214,17 +308,39 @@ export class DeferredActionsPanel extends LitElement {
     const formElement = event.currentTarget as HTMLFormElement;
     const form = new FormData(formElement);
     try {
-      const sequence = this.editor?.mode === "simple"
-        ? [{ action: this.simpleAction, target: { entity_id: this.simpleEntity } }]
-        : load(String(form.get("yaml")));
+      if (!this.editor?.job && this.creationKind === "run_for") {
+        const value = Number(form.get("delay_value"));
+        const unit = String(form.get("delay_unit"));
+        if (!Number.isFinite(value) || value <= 0) throw new Error("Duration must be greater than zero");
+        if (!this.runForStart || !this.runForEnd || !Object.values(this.runForTarget).some((ids) => ids?.length)) throw new Error("Choose a target, start action, and end action");
+        this.busy = true;
+        await runFor(this.hass, {
+          name: String(form.get("name")), description: String(form.get("description") ?? "") || undefined,
+          duration: { [unit]: value },
+          start_sequence: visualToSequence([{ action: this.runForStart, target: this.runForTarget, data: [] }]),
+          end_sequence: visualToSequence([{ action: this.runForEnd, target: this.runForTarget, data: [] }]),
+          job_key: String(form.get("job_key") ?? "") || undefined,
+          tags: String(form.get("tags") ?? "").split(",").map((tag) => tag.trim()).filter(Boolean),
+          conflict_mode: String(form.get("conflict_mode") ?? "keep_all"),
+        });
+        await this.refresh();
+        this.editor = undefined;
+        return;
+      }
+      const sequence = this.editor?.mode === "visual" ? visualToSequence(this.visualActions) : load(this.actionYaml);
       if (!Array.isArray(sequence)) throw new Error("Advanced YAML must be a list of actions");
-      if (this.editor?.mode === "simple" && (!this.simpleAction || !this.simpleEntity)) throw new Error("Choose both an action and entity");
+      if (this.editor?.mode === "visual" && (this.visualActions.length === 0 || this.visualActions.some((action) => !action.action))) throw new Error("Choose a service for every action");
+      const conditions = this.conditionMode === "visual" ? visualToConditions(this.visualConditions) : (this.conditionsYaml.trim() ? load(this.conditionsYaml) : []);
+      if (this.conditionMode === "visual" && this.visualConditions.items.some((condition) =>
+        condition.type === "state" ? !condition.entity_id || !condition.state
+          : condition.type === "numeric_state" ? !condition.entity_id || (!condition.above.trim() && !condition.below.trim())
+            : !condition.after && !condition.before && condition.weekdays.length === 0)) throw new Error("Complete or remove each condition");
       const common = {
         name: String(form.get("name")), description: String(form.get("description") ?? "") || undefined,
         job_key: String(form.get("job_key") ?? "") || undefined,
         tags: String(form.get("tags") ?? "").split(",").map((tag) => tag.trim()).filter(Boolean),
         target_entities: String(form.get("target_entities") ?? "").split(",").map((entity) => entity.trim()).filter(Boolean), sequence,
-        conditions: String(form.get("conditions_yaml") ?? "").trim() ? load(String(form.get("conditions_yaml"))) : [],
+        conditions,
         condition_failure: String(form.get("condition_failure") ?? "skip"),
         overdue_policy: String(form.get("overdue_policy") ?? "") || null,
         overdue_grace: String(form.get("overdue_grace_minutes") ?? "") ? { minutes: Number(form.get("overdue_grace_minutes")) } : null,
@@ -250,8 +366,81 @@ export class DeferredActionsPanel extends LitElement {
         await createJob(this.hass, { ...common, ...schedule, conflict_mode: String(form.get("conflict_mode") ?? "keep_all") });
       }
       this.editor = undefined;
-    } catch (error) { this.error = String(error); }
+    } catch (error) { this.setError(error); }
     finally { this.busy = false; }
+  }
+
+  private updateAction(index: number, patch: Partial<VisualAction>): void {
+    this.visualActions = this.visualActions.map((action, itemIndex) => itemIndex === index ? { ...action, ...patch } : action);
+  }
+
+  private updateData(actionIndex: number, dataIndex: number, patch: Partial<VisualAction["data"][number]>): void {
+    const action = this.visualActions[actionIndex];
+    if (!action) return;
+    this.updateAction(actionIndex, { data: action.data.map((entry, itemIndex) => itemIndex === dataIndex ? { ...entry, ...patch } : entry) });
+  }
+
+  private updateCondition(index: number, condition: VisualCondition): void {
+    this.visualConditions = { ...this.visualConditions, items: this.visualConditions.items.map((item, itemIndex) => itemIndex === index ? condition : item) };
+  }
+
+  private changeConditionType(index: number, type: VisualCondition["type"]): void {
+    const condition: VisualCondition = type === "state" ? { type, entity_id: "", state: "" }
+      : type === "numeric_state" ? { type, entity_id: "", above: "", below: "" }
+        : { type, after: "", before: "", weekdays: [] };
+    this.updateCondition(index, condition);
+  }
+
+  private toggleWeekday(index: number, condition: Extract<VisualCondition, { type: "time" }>, weekday: string, checked: boolean): void {
+    this.updateCondition(index, { ...condition, weekdays: checked ? [...condition.weekdays, weekday] : condition.weekdays.filter((item) => item !== weekday) });
+  }
+
+  private switchActionMode(): void {
+    if (this.editor?.mode === "visual") {
+      this.actionYaml = dump(visualToSequence(this.visualActions), { noRefs: true });
+      this.editor = { ...this.editor, mode: "yaml" };
+      return;
+    }
+    try {
+      const loaded = load(this.actionYaml);
+      if (!Array.isArray(loaded)) throw new Error("Action YAML must be a list");
+      const visual = sequenceToVisual(loaded as Record<string, unknown>[]);
+      if (!visual) throw new Error("This sequence uses advanced features that the visual editor cannot represent safely.");
+      this.visualActions = visual;
+      this.editor = { ...this.editor!, mode: "visual" };
+    } catch (error) { this.setError(error); }
+  }
+
+  private switchConditionMode(): void {
+    if (this.conditionMode === "visual") {
+      this.conditionsYaml = dump(visualToConditions(this.visualConditions), { noRefs: true });
+      this.conditionMode = "yaml";
+      return;
+    }
+    try {
+      const loaded = this.conditionsYaml.trim() ? load(this.conditionsYaml) : [];
+      if (!Array.isArray(loaded)) throw new Error("Conditions YAML must be a list");
+      const visual = conditionsToVisual(loaded as Record<string, unknown>[]);
+      if (!visual) throw new Error("These conditions use advanced options that the visual editor cannot represent safely.");
+      this.visualConditions = visual;
+      this.conditionMode = "visual";
+    } catch (error) { this.setError(error); }
+  }
+
+  private actionLabel(action: string, target: VisualTarget): string {
+    const verb = action.split(".").pop()?.replaceAll("_", " ") ?? "Run action";
+    const targetValue = target.entity_id ?? target.device_id ?? target.area_id ?? target.floor_id ?? target.label_id;
+    const targetId = Array.isArray(targetValue) ? targetValue[0] : targetValue;
+    const targetLabel = targetId?.split(".").pop()?.replaceAll("_", " ");
+    return `${verb.charAt(0).toUpperCase()}${verb.slice(1)}${targetLabel ? ` ${targetLabel}` : ""}`;
+  }
+
+  private editorPreview(job?: DeferredJob): string {
+    if (job) return `${this.visualActions[0] ? this.actionLabel(this.visualActions[0].action, this.visualActions[0].target) : job.action_summary}; scheduled for ${localDate(job.execute_at_local)}`;
+    if (this.creationKind === "run_for") return `${this.actionLabel(this.runForStart, this.runForTarget)} now, then ${this.actionLabel(this.runForEnd, this.runForTarget).toLowerCase()} in ${this.previewDelay} ${this.previewUnit}`;
+    const first = this.visualActions[0];
+    const action = first ? this.actionLabel(first.action, first.target) : "Run the configured action";
+    return this.scheduleMode === "delay" ? `${action} in ${this.previewDelay} ${this.previewUnit}` : `${action} at the selected date and time`;
   }
 
   private renderQuickDialog() {
@@ -280,20 +469,36 @@ export class DeferredActionsPanel extends LitElement {
     this.quickDialog = undefined;
   }
 
+  private renderConfirmation() {
+    const confirmation = this.confirmAction;
+    if (!confirmation) return nothing;
+    const isDelete = confirmation.operation === "delete";
+    const isCancel = confirmation.operation === "cancel";
+    const title = isDelete ? "Delete this record permanently?" : isCancel ? "Cancel this deferred action?" : "Run this action now?";
+    const explanation = isDelete
+      ? "This permanently removes the record and its history. This cannot be undone."
+      : isCancel ? "The action will not run, but the cancelled record will remain in history." : "This bypasses the remaining delay and starts the action now.";
+    return html`<div class="overlay" @click=${() => { this.confirmAction = undefined; }}><section class="dialog small confirmation" role="alertdialog" aria-modal="true" @click=${(event: Event) => event.stopPropagation()}>
+      <header><h2>${title}</h2><button class="icon" title="Close" @click=${() => { this.confirmAction = undefined; }}><ha-icon icon="mdi:close"></ha-icon></button></header>
+      <p><strong>${confirmation.job.name}</strong></p><p>${explanation}</p>
+      <footer><button @click=${() => { this.confirmAction = undefined; }}>Keep it</button><button class=${isDelete ? "danger" : isCancel ? "warning" : "primary"} ?disabled=${this.busy} @click=${async () => { const current = this.confirmAction; this.confirmAction = undefined; if (current) await this.performOperation(current.operation, current.job); }}>${isDelete ? "Delete permanently" : isCancel ? "Cancel action" : "Run now"}</button></footer>
+    </section></div>`;
+  }
+
   protected render() {
     const visible = this.visibleJobs();
     return html`<ha-card>
-      <header class="top"><h1>Deferred Actions</h1><button class="primary" @click=${() => this.openEditor()}><ha-icon icon="mdi:plus"></ha-icon>Add action</button></header>
-      ${this.error ? html`<div class="banner">${this.error}<button class="icon" @click=${() => { this.error = undefined; }}><ha-icon icon="mdi:close"></ha-icon></button></div>` : nothing}
+      <header class="top"><h1>Deferred Actions</h1><div class="create-actions"><button @click=${() => this.openRunFor()}><ha-icon icon="mdi:timer-play-outline"></ha-icon>Run for a while</button><button class="primary" @click=${() => this.openEditor()}><ha-icon icon="mdi:clock-plus-outline"></ha-icon>Do something later</button></div></header>
+      ${this.error ? html`<div class="banner"><div>${this.error}${this.errorDetails ? html`<details><summary>Technical details</summary><code>${this.errorDetails}</code></details>` : nothing}</div><button class="icon" @click=${() => { this.error = undefined; this.errorDetails = undefined; }}><ha-icon icon="mdi:close"></ha-icon></button></div>` : nothing}
       <nav>${(["Pending", "Paused", "Failed", "History"] as Tab[]).map((tab) => html`<button class=${this.tab === tab ? "active" : ""} @click=${() => { this.tab = tab; }}>${tab}<span>${tab === "Pending" ? this.summary.pending : tab === "Paused" ? this.summary.paused : tab === "Failed" ? this.summary.failed : ""}</span></button>`)}<button class=${this.tab === "All" ? "active" : ""} title="All actions" @click=${() => { this.tab = "All"; }}><ha-icon icon="mdi:format-list-bulleted"></ha-icon></button></nav>
       <section class="next"><ha-icon icon="mdi:clock-outline"></ha-icon><span>Next:</span><strong>${this.summary.next_job_name ?? "No pending actions"}</strong>${this.summary.next_execution_local ? html`<small>${localDate(this.summary.next_execution_local)} · ${relativeTime(this.summary.next_execution_local)}</small>` : nothing}</section>
       <main>${visible.length ? visible.map((job) => this.renderJob(job)) : html`<div class="empty"><ha-icon icon="mdi:calendar-check"></ha-icon><p>No ${this.tab.toLowerCase()} deferred actions.</p></div>`}</main>
-      ${this.selected ? this.renderDetails(this.selected) : nothing}${this.editor ? this.renderEditor() : nothing}${this.renderQuickDialog()}
+      ${this.selected ? this.renderDetails(this.selected) : nothing}${this.editor ? this.renderEditor() : nothing}${this.renderQuickDialog()}${this.renderConfirmation()}
     </ha-card>`;
   }
 
   static styles = css`
-    :host{display:block;color:var(--primary-text-color);background:var(--primary-background-color);min-height:100vh}ha-card{max-width:980px;margin:24px auto;padding:24px;background:var(--card-background-color);box-sizing:border-box}.top{display:flex;justify-content:space-between;align-items:center;gap:16px}.top h1{margin:0;font-size:28px}button{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid var(--divider-color);border-radius:10px;padding:9px 12px;background:var(--secondary-background-color);color:var(--primary-text-color);cursor:pointer}button.primary{background:var(--primary-color);color:var(--text-primary-color);border-color:var(--primary-color)}button.danger{color:var(--error-color)}button.warning{color:var(--warning-color)}button.quiet,button.icon,button.link{background:none}button.icon{padding:8px;border:0}button.link{border:0;color:var(--primary-color);padding:4px}button:disabled{opacity:.5}nav{display:flex;align-items:end;gap:4px;overflow:auto;border-bottom:1px solid var(--divider-color);margin-top:20px}nav button{border:0;background:none;border-radius:0}nav button span{min-width:20px;padding:2px 6px;border-radius:999px;background:var(--secondary-background-color);font-size:12px}nav button.active{color:var(--primary-color);border-bottom:3px solid var(--primary-color)}.next{display:flex;align-items:center;gap:8px;padding:12px 4px;color:var(--secondary-text-color)}.next strong{color:var(--primary-text-color)}.next small{margin-left:auto}main{display:flex;flex-direction:column;border-top:1px solid var(--divider-color)}.job{position:relative;display:grid;grid-template-columns:auto 1fr auto;gap:14px;align-items:center;padding:16px 4px;border-bottom:1px solid var(--divider-color);cursor:pointer}.job:hover{background:var(--secondary-background-color)}.job-icon{color:var(--primary-color)}.job-head{display:flex;align-items:center;gap:8px}.job h3{margin:0;font-size:16px}.job p{margin:5px 0 0;color:var(--secondary-text-color)}.time{color:var(--secondary-text-color);font-size:13px;margin-top:4px}.status{font-size:12px;border-radius:999px;padding:3px 7px;background:var(--secondary-background-color);text-transform:capitalize}.status.failed{color:var(--error-color)}.row-actions{display:flex;align-items:center;gap:4px}.row-actions ha-icon{--mdc-icon-size:18px}.menu-wrap{position:relative}.menu{position:absolute;z-index:4;right:0;top:100%;display:flex;flex-direction:column;min-width:210px;padding:6px;background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:12px;box-shadow:var(--ha-card-box-shadow,0 4px 14px rgba(0,0,0,.2))}.menu button{justify-content:flex-start;border:0;background:none}.error,.banner{color:var(--error-color);padding:10px;background:color-mix(in srgb,var(--error-color) 10%,transparent);border-radius:10px}.error.compact{margin-top:8px}.banner{display:flex;justify-content:space-between;margin:12px 0}.empty{text-align:center;padding:56px;color:var(--secondary-text-color)}.empty ha-icon{--mdc-icon-size:48px}.overlay{position:fixed;z-index:10;inset:0;background:rgba(0,0,0,.48);display:grid;place-items:center;padding:16px}.dialog{width:min(620px,100%);max-height:90vh;overflow:auto;background:var(--card-background-color);border-radius:16px;padding:20px;box-sizing:border-box}.dialog.wide{width:min(820px,100%)}.dialog.small{width:min(480px,100%)}.dialog header,.dialog footer,.section-head{display:flex;justify-content:space-between;align-items:center;gap:8px}.dialog header h2,.section-head h3{margin:0}.dialog header>div{display:flex;align-items:center;gap:10px}.dialog label{display:flex;flex-direction:column;gap:6px;margin:14px 0}.dialog input,.dialog textarea,.dialog select{font:inherit;padding:10px;border:1px solid var(--divider-color);border-radius:8px;color:var(--primary-text-color);background:var(--primary-background-color)}.dialog textarea{min-height:70px}.dialog textarea.yaml{min-height:260px;font-family:monospace}.dialog footer{margin-top:20px;justify-content:flex-end}.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}fieldset,.action-editor,.advanced{border:1px solid var(--divider-color);border-radius:12px;padding:14px;margin-top:16px}.segmented,.delay-row,.chips,.detail-actions{display:flex;gap:8px}.segmented button{flex:1}.segmented .active{border-color:var(--primary-color);color:var(--primary-color)}.delay-row input{flex:1}.delay-row select{min-width:130px}.chips{flex-wrap:wrap;margin-top:10px}.chips button{padding:6px 9px}.advanced summary,details summary{cursor:pointer;font-weight:600}.detail-summary{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:18px 0}.detail-summary>div{display:flex;flex-direction:column;gap:4px;padding:14px;border:1px solid var(--divider-color);border-radius:12px}.detail-summary span,.detail-summary small{color:var(--secondary-text-color)}details{margin-top:14px}dl{display:grid;grid-template-columns:minmax(130px,auto) 1fr;gap:8px 16px}dt{font-weight:600}dd{margin:0;overflow-wrap:anywhere}pre{padding:12px;overflow:auto;background:var(--secondary-background-color);border-radius:10px;white-space:pre-wrap}@media(max-width:700px){ha-card{margin:0;padding:16px;min-height:100vh;border-radius:0}.top h1{font-size:24px}.next{flex-wrap:wrap}.next small{width:100%;margin-left:32px}.job{grid-template-columns:auto 1fr}.row-actions{grid-column:2}.row-actions .quiet{flex:1}.overlay{padding:0}.dialog{width:100%;height:100%;max-height:none;border-radius:0}.two,.detail-summary{grid-template-columns:1fr}dl{grid-template-columns:1fr}dd{margin-bottom:8px}}
+    :host{display:block;color:var(--primary-text-color);background:var(--primary-background-color);min-height:100vh}ha-card{max-width:980px;margin:24px auto;padding:24px;background:var(--card-background-color);box-sizing:border-box}.top{display:flex;justify-content:space-between;align-items:center;gap:16px}.top h1{margin:0;font-size:28px}.create-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}button{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid var(--divider-color);border-radius:10px;padding:9px 12px;background:var(--secondary-background-color);color:var(--primary-text-color);cursor:pointer}button.primary{background:var(--primary-color);color:var(--text-primary-color);border-color:var(--primary-color)}button.danger{color:var(--error-color)}button.warning{color:var(--warning-color)}button.quiet,button.icon,button.link{background:none}button.icon{padding:8px;border:0}button.link{border:0;color:var(--primary-color);padding:4px}button:disabled{opacity:.5}nav{display:flex;align-items:end;gap:4px;overflow:auto;border-bottom:1px solid var(--divider-color);margin-top:20px}nav button{border:0;background:none;border-radius:0}nav button span{min-width:20px;padding:2px 6px;border-radius:999px;background:var(--secondary-background-color);font-size:12px}nav button.active{color:var(--primary-color);border-bottom:3px solid var(--primary-color)}.next{display:flex;align-items:center;gap:8px;padding:12px 4px;color:var(--secondary-text-color)}.next strong{color:var(--primary-text-color)}.next small{margin-left:auto}main{display:flex;flex-direction:column;border-top:1px solid var(--divider-color)}.job{position:relative;display:grid;grid-template-columns:auto 1fr auto;gap:14px;align-items:center;padding:16px 4px;border-bottom:1px solid var(--divider-color);cursor:pointer}.job:hover{background:var(--secondary-background-color)}.job-icon{color:var(--primary-color)}.job-head{display:flex;align-items:center;gap:8px}.job h3{margin:0;font-size:16px}.job p{margin:5px 0 0;color:var(--secondary-text-color)}.time{color:var(--secondary-text-color);font-size:13px;margin-top:4px}.status{font-size:12px;border-radius:999px;padding:3px 7px;background:var(--secondary-background-color);text-transform:capitalize}.status.failed{color:var(--error-color)}.row-actions{display:flex;align-items:center;gap:4px}.row-actions ha-icon{--mdc-icon-size:18px}.menu-wrap{position:relative}.menu{position:absolute;z-index:4;right:0;top:100%;display:flex;flex-direction:column;min-width:210px;padding:6px;background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:12px;box-shadow:var(--ha-card-box-shadow,0 4px 14px rgba(0,0,0,.2))}.menu button{justify-content:flex-start;border:0;background:none}.error,.banner{color:var(--error-color);padding:10px;background:color-mix(in srgb,var(--error-color) 10%,transparent);border-radius:10px}.error.compact{margin-top:8px}.banner{display:flex;justify-content:space-between;margin:12px 0}.banner details{color:var(--secondary-text-color);font-size:12px}.empty{text-align:center;padding:56px;color:var(--secondary-text-color)}.empty ha-icon{--mdc-icon-size:48px}.overlay{position:fixed;z-index:10;inset:0;background:rgba(0,0,0,.48);display:grid;place-items:center;padding:16px}.dialog{width:min(620px,100%);max-height:90vh;overflow:auto;background:var(--card-background-color);border-radius:16px;padding:20px;box-sizing:border-box}.dialog.wide{width:min(820px,100%)}.dialog.small{width:min(480px,100%)}.dialog header,.dialog footer,.section-head{display:flex;justify-content:space-between;align-items:center;gap:8px}.dialog header h2,.section-head h3{margin:0}.dialog header>div{display:flex;align-items:center;gap:10px}.dialog label{display:flex;flex-direction:column;gap:6px;margin:14px 0}.dialog input,.dialog textarea,.dialog select{font:inherit;padding:10px;border:1px solid var(--divider-color);border-radius:8px;color:var(--primary-text-color);background:var(--primary-background-color)}.dialog textarea{min-height:70px}.dialog textarea.yaml{min-height:260px;font-family:monospace}.dialog textarea.small-yaml{min-height:150px}.dialog footer{margin-top:20px;justify-content:flex-end}.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}fieldset,.action-editor,.advanced,.normal-options{border:1px solid var(--divider-color);border-radius:12px;padding:14px;margin-top:16px}.segmented,.delay-row,.chips,.detail-actions{display:flex;gap:8px}.creation-kind{margin:16px 0}.segmented button{flex:1}.segmented .active{border-color:var(--primary-color);color:var(--primary-color)}.delay-row input{flex:1;min-width:0}.delay-row select{min-width:130px}.chips{flex-wrap:wrap;margin-top:10px}.chips button{padding:6px 9px}.advanced summary,details summary{cursor:pointer;font-weight:600}.visual-card{border:1px solid var(--divider-color);border-radius:10px;padding:12px;margin:12px 0;background:var(--primary-background-color)}.data-row{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;margin:8px 0}.weekdays{display:flex;flex-wrap:wrap;gap:8px}.weekdays label{flex-direction:row;margin:0;padding:7px 9px;border:1px solid var(--divider-color);border-radius:8px}.preview{display:flex;gap:12px;align-items:center;padding:14px;margin-top:16px;border-radius:12px;background:color-mix(in srgb,var(--primary-color) 9%,transparent)}.preview div{display:flex;flex-direction:column;gap:3px}.timeline{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:12px}.timeline div{display:flex;flex-direction:column;padding:12px;border-radius:10px;background:var(--secondary-background-color)}.timeline span{color:var(--secondary-text-color);font-size:12px}.detail-summary{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:18px 0}.detail-summary>div{display:flex;flex-direction:column;gap:4px;padding:14px;border:1px solid var(--divider-color);border-radius:12px}.detail-summary span,.detail-summary small{color:var(--secondary-text-color)}details{margin-top:14px}dl{display:grid;grid-template-columns:minmax(130px,auto) 1fr;gap:8px 16px}dt{font-weight:600}dd{margin:0;overflow-wrap:anywhere}pre{padding:12px;overflow:auto;background:var(--secondary-background-color);border-radius:10px;white-space:pre-wrap}@media(max-width:700px){ha-card{margin:0;padding:16px;min-height:100vh;border-radius:0}.top{align-items:flex-start;flex-direction:column}.create-actions{width:100%}.create-actions button{flex:1}.top h1{font-size:24px}.next{flex-wrap:wrap}.next small{width:100%;margin-left:32px}.job{grid-template-columns:auto 1fr}.row-actions{grid-column:2}.row-actions .quiet{flex:1}.overlay{padding:0}.dialog{width:100%;height:100%;max-height:none;border-radius:0}.two,.detail-summary,.timeline{grid-template-columns:1fr}.timeline>ha-icon{transform:rotate(90deg);justify-self:center}.data-row{grid-template-columns:1fr auto}.data-row input+input{grid-column:1}.data-row button{grid-column:2;grid-row:1/3}.creation-kind{flex-direction:column}dl{grid-template-columns:1fr}dd{margin-bottom:8px}}
   `;
 }
 

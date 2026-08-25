@@ -1,5 +1,6 @@
 export interface HomeAssistant {
   callWS<T>(message: Record<string, unknown>): Promise<T>;
+  callService<T = unknown>(domain: string, service: string, serviceData?: Record<string, unknown>, target?: Record<string, unknown>, notifyOnError?: boolean, returnResponse?: boolean): Promise<T>;
   connection: {
     subscribeMessage<T>(callback: (event: T) => void, message: Record<string, unknown>): Promise<() => void>;
   };
