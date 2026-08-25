@@ -25,8 +25,8 @@ export const isHistoryStatus = (status: JobStatus): boolean =>
 export const effectiveOverdueLabel = (job: DeferredJob): string => {
   const inherited = job.overdue_policy ? "job override" : "inherited";
   if (job.effective_overdue_policy === "execute_within_grace") {
-    return `Execute within ${job.effective_overdue_grace_minutes} minutes (${inherited})`;
+    return `Run only if less than ${job.effective_overdue_grace_minutes} minutes late (${inherited})`;
   }
-  return `${job.effective_overdue_policy} (${inherited})`;
+  return `${job.effective_overdue_policy === "execute" ? "Run when Home Assistant comes back" : "Don’t run"} (${inherited})`;
 };
 import type { DeferredJob, JobStatus } from "./types";

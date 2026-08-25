@@ -27,10 +27,10 @@ describe("job presentation", () => {
       effective_overdue_policy: "execute_within_grace",
       effective_overdue_grace_minutes: 5,
     } as DeferredJob;
-    expect(effectiveOverdueLabel(job)).toBe("Execute within 5 minutes (inherited)");
+    expect(effectiveOverdueLabel(job)).toBe("Run only if less than 5 minutes late (inherited)");
     job.overdue_policy = "skip";
     job.effective_overdue_policy = "skip";
-    expect(effectiveOverdueLabel(job)).toBe("skip (job override)");
+    expect(effectiveOverdueLabel(job)).toBe("Don’t run (job override)");
   });
 
   it("uses only explicit resolution hints", () => {
