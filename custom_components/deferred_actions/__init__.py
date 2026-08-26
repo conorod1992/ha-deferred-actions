@@ -136,9 +136,15 @@ async def _async_options_updated(hass: HomeAssistant, entry: DeferredActionsConf
 
 async def async_unload_entry(hass: HomeAssistant, entry: DeferredActionsConfigEntry) -> bool:
     """Unload the entry and all owned resources."""
-    if not await entry.runtime_data.manager.async_unload():
-        return False
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        return False
+    try:
+        manager_unloaded = await entry.runtime_data.manager.async_unload()
+    except BaseException:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        raise
+    if not manager_unloaded:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         return False
     if entry.runtime_data.panel_registered:
         frontend.async_remove_panel(hass, PANEL_URL)

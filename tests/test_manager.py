@@ -14,6 +14,7 @@ from custom_components.deferred_actions.models import (
     InvalidStatusError,
     InvalidTimeError,
     JobStatus,
+    ManagerUnavailableError,
     RevisionConflictError,
     UnsafeActionError,
     utc_now,
@@ -169,6 +170,19 @@ async def test_unload_cancels_owned_in_flight_execution(manager) -> None:
     assert manager.jobs[job["id"]].status == JobStatus.EXECUTING
 
 
+async def test_owned_work_cannot_register_after_unload(manager) -> None:
+    ran = False
+
+    async def work() -> None:
+        nonlocal ran
+        ran = True
+
+    assert await manager.async_unload()
+    with pytest.raises(ManagerUnavailableError):
+        await manager.async_run_owned(work(), "rejected work")
+    assert not ran
+
+
 async def test_bulk_requires_confirmation_and_selector(manager) -> None:
     await create(manager)
     with pytest.raises(BulkConfirmationError):
@@ -202,6 +216,39 @@ async def test_conflicts_include_paused_and_all_same_key_matches(manager) -> Non
     assert replaced["id"] == second["id"]
     assert manager.jobs[first["id"]].status == JobStatus.CANCELLED
     assert manager.jobs[second["id"]].status == JobStatus.PENDING
+
+
+async def test_reject_same_key_is_rechecked_at_commit(manager) -> None:
+    with (
+        patch(
+            "custom_components.deferred_actions.manager.async_validate_sequence",
+            AsyncMock(side_effect=lambda _hass, value: value),
+        ),
+        patch(
+            "custom_components.deferred_actions.manager.async_validate_conditions",
+            AsyncMock(side_effect=lambda _hass, value: value or []),
+        ),
+    ):
+        prepared = await manager.async_prepare_create(
+            name="Rejecting create",
+            sequence=[{"action": "light.turn_off"}],
+            delay={"minutes": 10},
+            job_key="heater",
+            conflict_mode="reject_same_key",
+        )
+    competing = await create(
+        manager,
+        name="Competing create",
+        job_key="heater",
+        conflict_mode="keep_all",
+    )
+
+    with pytest.raises(ConflictError):
+        await manager.async_commit_create(prepared)
+
+    assert list(manager.jobs) == [competing["id"]]
+    assert manager.jobs[competing["id"]].status == JobStatus.PENDING
+    assert "heater" not in manager._create_reservations
 
 
 async def test_list_filters_and_json_data(manager) -> None:

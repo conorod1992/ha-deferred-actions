@@ -162,7 +162,12 @@ async def async_run_for(
     attribution: dict[str, Any],
     context=None,
 ) -> dict[str, Any]:
-    """Execute a start sequence, then schedule its end sequence."""
+    """Preflight known create failures, run the start, then durably create the end job.
+
+    A Store I/O failure during the final commit can still occur after the start
+    sequence has succeeded; callers receive that failure and no partial job remains
+    in the manager.
+    """
     from homeassistant.helpers.script import Script
 
     from .executor import async_validate_sequence
@@ -206,7 +211,7 @@ async def async_run_for(
     script = Script(manager.hass, start_sequence, "Deferred Actions run-for start", DOMAIN)
     try:
         await manager.async_run_owned(
-            script.async_run(context=context), "Deferred Actions run-for start"
+            lambda: script.async_run(context=context), "Deferred Actions run-for start"
         )
         return await manager.async_commit_create(prepared)
     except BaseException:

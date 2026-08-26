@@ -1,5 +1,6 @@
 """Focused service-schema validation tests."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,7 +10,12 @@ import voluptuous as vol
 from homeassistant.core import SupportsResponse
 
 from custom_components.deferred_actions.manager import DeferredActionsManager
-from custom_components.deferred_actions.models import ConflictError, InvalidTimeError, utc_now
+from custom_components.deferred_actions.models import (
+    ConflictError,
+    InvalidTimeError,
+    ManagerUnavailableError,
+    utc_now,
+)
 from custom_components.deferred_actions.services import (
     SERVICE_NAMES,
     SERVICE_SCHEMAS,
@@ -165,3 +171,86 @@ async def test_run_for_start_failure_leaves_no_job_and_success_commits(manager) 
     assert result["sequence"] == data["end_sequence"]
     assert result["linkage"]["operation"] == "run_for"
     assert utc_now() < execute_at < utc_now() + timedelta(minutes=6)
+
+
+async def test_run_for_does_not_start_after_unload_begins(manager) -> None:
+    prepared = asyncio.Event()
+    continue_after_unload = asyncio.Event()
+    original_prepare = manager.async_prepare_create
+
+    async def pause_after_prepare(**kwargs):
+        result = await original_prepare(**kwargs)
+        prepared.set()
+        await continue_after_unload.wait()
+        return result
+
+    script = MagicMock()
+    script.return_value.async_run = AsyncMock()
+    validators = AsyncMock(side_effect=lambda _hass, value: value)
+    with (
+        patch.object(manager, "async_prepare_create", side_effect=pause_after_prepare),
+        patch("homeassistant.helpers.script.Script", script),
+        patch("custom_components.deferred_actions.executor.async_validate_sequence", validators),
+        patch("custom_components.deferred_actions.manager.async_validate_sequence", validators),
+    ):
+        service_call = asyncio.create_task(
+            async_run_for(
+                manager,
+                {
+                    "duration": {"minutes": 5},
+                    "start_sequence": [{"action": "light.turn_on"}],
+                    "end_sequence": [{"action": "light.turn_off"}],
+                    "job_key": "run-for-race",
+                },
+                attribution={"source": "service"},
+            )
+        )
+        await prepared.wait()
+        assert await manager.async_unload()
+        continue_after_unload.set()
+        with pytest.raises(ManagerUnavailableError):
+            await service_call
+
+    script.return_value.async_run.assert_not_called()
+    assert not manager.jobs
+
+
+async def test_run_for_commit_failure_is_surfaced_without_corrupting_other_jobs(manager) -> None:
+    validators = AsyncMock(side_effect=lambda _hass, value: value)
+    with patch("custom_components.deferred_actions.manager.async_validate_sequence", validators):
+        unrelated = await manager.async_create(
+            name="Unrelated",
+            sequence=[{"action": "light.turn_off"}],
+            delay={"minutes": 20},
+            job_key="shared-storage-failure",
+        )
+    script = MagicMock()
+    script.return_value.async_run = AsyncMock()
+    with (
+        patch("homeassistant.helpers.script.Script", script),
+        patch("custom_components.deferred_actions.executor.async_validate_sequence", validators),
+        patch("custom_components.deferred_actions.manager.async_validate_sequence", validators),
+        patch.object(
+            manager._storage,
+            "async_save",
+            AsyncMock(side_effect=OSError("storage unavailable")),
+        ),
+        pytest.raises(OSError, match="storage unavailable"),
+    ):
+        await async_run_for(
+            manager,
+            {
+                "duration": {"minutes": 5},
+                "start_sequence": [{"action": "light.turn_on"}],
+                "end_sequence": [{"action": "light.turn_off"}],
+                "job_key": "shared-storage-failure",
+                "conflict_mode": "replace_same_key",
+            },
+            attribution={"source": "service"},
+        )
+
+    script.return_value.async_run.assert_awaited_once()
+    assert list(manager.jobs) == [unrelated["id"]]
+    assert manager.jobs[unrelated["id"]].name == "Unrelated"
+    assert manager.jobs[unrelated["id"]].revision == unrelated["revision"]
+    assert "shared-storage-failure" not in manager._create_reservations

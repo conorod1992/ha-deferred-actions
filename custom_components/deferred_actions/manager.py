@@ -60,6 +60,7 @@ from .models import (
     InvalidTimeError,
     JobNotFoundError,
     JobStatus,
+    ManagerUnavailableError,
     RevisionConflictError,
     UnsafeActionError,
     ensure_utc,
@@ -115,11 +116,12 @@ class DeferredActionsManager:
 
     async def async_unload(self) -> bool:
         """Stop callbacks and flush storage."""
-        self._unloaded = True
-        if self._cancel_next:
-            self._cancel_next()
-            self._cancel_next = None
-        tasks = tuple(self._execution_tasks)
+        async with self._lock:
+            self._unloaded = True
+            if self._cancel_next:
+                self._cancel_next()
+                self._cancel_next = None
+            tasks = tuple(self._execution_tasks)
         for task in tasks:
             task.cancel()
         if tasks:
@@ -129,8 +131,8 @@ class DeferredActionsManager:
                     "%s deferred action execution task(s) did not stop during unload",
                     len(pending),
                 )
-                self._unloaded = False
                 async with self._lock:
+                    self._unloaded = False
                     self._async_reschedule_locked()
                 return False
         self._listeners.clear()
@@ -216,6 +218,8 @@ class DeferredActionsManager:
         self._cancel_next = None
         due: list[DeferredJob] = []
         async with self._lock:
+            if self._unloaded:
+                return
             for job in self.jobs.values():
                 if (
                     job.status in {JobStatus.PENDING, JobStatus.PAUSED}
@@ -238,14 +242,31 @@ class DeferredActionsManager:
     async def _async_execute_tracked(self, job: DeferredJob) -> dict[str, Any]:
         """Run an execution in a task owned and cancellable by this manager."""
         return await self.async_run_owned(
-            self._async_finish_execution(job), f"Deferred action execution: {job.id}"
+            lambda: self._async_finish_execution(job),
+            f"Deferred action execution: {job.id}",
         )
 
-    async def async_run_owned(self, awaitable: Awaitable[Any], name: str) -> Any:
-        """Run manager-owned action work with unload cancellation."""
-        task = self.hass.async_create_task(awaitable, name)
-        self._execution_tasks.add(task)
-        task.add_done_callback(self._execution_tasks.discard)
+    async def async_run_owned(
+        self, work: Awaitable[Any] | Callable[[], Awaitable[Any]], name: str
+    ) -> Any:
+        """Atomically register manager-owned action work or reject it before execution."""
+        async with self._lock:
+            if self._unloaded:
+                if not callable(work):
+                    close = getattr(work, "close", None)
+                    if close is not None:
+                        close()
+                raise ManagerUnavailableError("Deferred Actions is unloading")
+            awaitable = work() if callable(work) else work
+            try:
+                task = self.hass.async_create_task(awaitable, name)
+            except BaseException:
+                close = getattr(awaitable, "close", None)
+                if close is not None:
+                    close()
+                raise
+            self._execution_tasks.add(task)
+            task.add_done_callback(self._execution_tasks.discard)
         return await task
 
     async def _async_finish_execution(self, job: DeferredJob) -> dict[str, Any]:
@@ -575,6 +596,10 @@ class DeferredActionsManager:
                 snapshots = {job.id: deepcopy(job) for job in matches}
                 cancelled: list[DeferredJob] = []
                 try:
+                    if matches and mode == CONFLICT_REJECT:
+                        raise ConflictError(
+                            f"An active job already uses job_key {candidate.job_key}"
+                        )
                     if matches and mode == CONFLICT_REPLACE:
                         job = max(matches, key=lambda item: item.created_at)
                         for existing in matches:
