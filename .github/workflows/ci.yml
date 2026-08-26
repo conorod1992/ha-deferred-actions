@@ -44,5 +44,16 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+      - name: Upload validated PR 9 frontend output
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr9-validated-frontend
+          path: |
+            frontend/src/deferred-actions-panel.ts
+            frontend/src/timezone.ts
+            frontend/src/timezone.test.ts
+            frontend/src/service-selectors.ts
+            frontend/src/service-selectors.test.ts
+            custom_components/deferred_actions/frontend/deferred-actions-panel.js
       - name: Verify committed production bundle
         run: git diff --exit-code -- ../custom_components/deferred_actions/frontend/deferred-actions-panel.js
