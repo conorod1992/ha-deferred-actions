@@ -17,9 +17,33 @@ describe("visual action conversion", () => {
     expect(visualToSequence(visual!)).toEqual([{ service: "switch.turn_off", target: { entity_id: "switch.office" } }]);
   });
 
-  it("rejects advanced actions and nested data without changing them", () => {
-    expect(sequenceToVisual([{ choose: [], default: [] }])).toBeUndefined();
-    expect(sequenceToVisual([{ action: "light.turn_on", data: { transition: { seconds: 2 } } }])).toBeUndefined();
+  it("preserves unsupported nodes as YAML-required blocks", () => {
+    const source = [{ action: "light.turn_on", data: { transition: { seconds: 2 } } }];
+    const visual = sequenceToVisual(source);
+    expect(visual[0]?.kind).toBe("unsupported");
+    expect(visualToSequence(visual)).toEqual(source);
+  });
+
+  it("losslessly round trips nested If, Choose, Repeat, Parallel, Delay, and Wait blocks", () => {
+    const sequence = [{
+      alias: "Top-level choice",
+      choose: [{ alias: "At home", conditions: [{ condition: "zone", entity_id: "person.alex", zone: "zone.home" }], sequence: [
+        { if: [{ condition: "sun", after: "sunset", after_offset: "-00:10:00" }], then: [{ action: "light.turn_on", target: { entity_id: "light.porch" } }], else: [{ delay: { seconds: 5 } }] },
+        { repeat: { count: "{{ count }}", sequence: [{ wait_template: "{{ is_state('binary_sensor.ready', 'on') }}", timeout: 30, continue_on_timeout: false }] } },
+      ] }],
+      default: [{ parallel: [
+        { action: "notify.alex", data: { message: "Away" } },
+        { alias: "Lights", sequence: [{ action: "light.turn_off", target: { area_id: ["downstairs"] } }] },
+      ] }],
+    }];
+    expect(visualToSequence(sequenceToVisual(sequence))).toEqual(sequence);
+  });
+
+  it("preserves unsupported nested conditions without forcing the whole sequence to YAML", () => {
+    const sequence = [{ if: [{ condition: "template", value_template: "{{ true }}" }], then: [{ action: "script.safe" }] }];
+    const visual = sequenceToVisual(sequence);
+    expect(visual[0]?.kind).toBe("if");
+    expect(visualToSequence(visual)).toEqual(sequence);
   });
 
   it("preserves unchanged existing scalar action data losslessly", () => {
@@ -54,11 +78,18 @@ describe("visual condition conversion", () => {
     expect(visualToConditions(conditionsToVisual(source)!)).toEqual(source);
   });
 
-  it("rejects unsupported condition options and nested groups", () => {
-    expect(conditionsToVisual([{ condition: "state", entity_id: "x", state: "on", for: { minutes: 5 } }])).toBeUndefined();
-    expect(conditionsToVisual([{ condition: "and", conditions: [{ condition: "template", value_template: "{{ true }}" }] }])).toBeUndefined();
-    expect(conditionsToVisual([{ condition: "numeric_state", entity_id: "sensor.x", above: "input_number.limit" }])).toBeUndefined();
-    expect(conditionsToVisual([{ condition: "time", after: "input_datetime.start" }])).toBeUndefined();
+  it("round trips nested logical, zone, sun, aliases, and unsupported conditions", () => {
+    const source = [{ condition: "and", alias: "Safety", conditions: [
+      { condition: "or", conditions: [{ condition: "zone", entity_id: "person.alex", zone: "zone.home" }, { condition: "sun", after: "sunset" }] },
+      { condition: "not", conditions: [{ condition: "template", value_template: "{{ is_state('alarm_control_panel.home', 'triggered') }}" }] },
+    ] }];
+    expect(visualToConditions(conditionsToVisual(source))).toEqual(source);
+  });
+
+  it("preserves unsupported options as YAML-required condition nodes", () => {
+    const source = [{ condition: "state", entity_id: "x", state: "on", for: { minutes: 5 } }];
+    expect(conditionsToVisual(source).items[0]?.type).toBe("unsupported");
+    expect(visualToConditions(conditionsToVisual(source))).toEqual(source);
   });
 });
 
