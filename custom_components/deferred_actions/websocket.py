@@ -9,7 +9,7 @@ from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 
 from .const import DOMAIN
-from .models import AmbiguousJobError, DeferredActionsError
+from .models import AmbiguousJobError, DeferredActionsError, ManagerUnavailableError
 
 COMMANDS = (
     "list",
@@ -29,7 +29,14 @@ COMMANDS = (
 
 
 def _manager(hass: HomeAssistant):
-    return hass.config_entries.async_entries(DOMAIN)[0].runtime_data.manager
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        try:
+            manager = entry.runtime_data.manager
+        except (AttributeError, RuntimeError):
+            continue
+        if manager.available:
+            return manager
+    raise ManagerUnavailableError("Deferred Actions is temporarily unavailable")
 
 
 async def _dispatch(manager, operation: str, data: dict[str, Any]):
@@ -83,7 +90,11 @@ def _make_handler(operation: str):
 @callback
 def websocket_subscribe(hass: HomeAssistant, connection, msg):
     """Subscribe an authenticated administrator to queue changes."""
-    manager = _manager(hass)
+    try:
+        manager = _manager(hass)
+    except DeferredActionsError as err:
+        connection.send_error(msg["id"], err.code, str(err))
+        return
     connection.send_result(msg["id"])
     connection.subscriptions[msg["id"]] = manager.async_subscribe(
         lambda event: connection.send_message(websocket_api.event_message(msg["id"], event))
