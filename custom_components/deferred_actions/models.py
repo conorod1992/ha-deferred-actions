@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
+
+from homeassistant.core import valid_entity_id
 
 
 class JobStatus(StrEnum):
@@ -80,6 +82,10 @@ class UnsafeActionError(DeferredActionsError):
     code = "unsafe_action"
 
 
+class ManagerUnavailableError(DeferredActionsError):
+    code = "not_loaded"
+
+
 def utc_now() -> datetime:
     """Return an aware UTC timestamp."""
     return datetime.now(UTC)
@@ -134,7 +140,17 @@ class DeferredJob:
     @classmethod
     def from_storage(cls, data: dict[str, Any]) -> DeferredJob:
         """Deserialize and validate a stored job."""
+        if not isinstance(data, dict):
+            raise TypeError("Stored job must be an object")
         values = dict(data)
+        if not isinstance(values.get("id"), str) or not values["id"]:
+            raise ValueError("Stored job id is invalid")
+        if not isinstance(values.get("name"), str) or not values["name"].strip():
+            raise ValueError("Stored job name is invalid")
+        if not isinstance(values.get("sequence"), list) or not values["sequence"]:
+            raise ValueError("Stored job sequence is invalid")
+        if not all(isinstance(action, dict) for action in values["sequence"]):
+            raise ValueError("Stored job sequence contains a non-object action")
         for key in ("execute_at", "created_at", "modified_at"):
             values[key] = ensure_utc(datetime.fromisoformat(values[key]))
         if values.get("completed_at"):
@@ -151,6 +167,27 @@ class DeferredJob:
         values.setdefault("overdue_grace", None)
         values.setdefault("valid_until", None)
         values.setdefault("terminal_reason", None)
+        for key in ("tags", "target_entities", "explicit_target_entities", "condition_entities"):
+            if not isinstance(values.get(key), list) or not all(
+                isinstance(item, str) for item in values[key]
+            ):
+                raise ValueError(f"Stored {key} is invalid")
+        for key in ("target_entities", "explicit_target_entities", "condition_entities"):
+            if not all(valid_entity_id(item) for item in values[key]):
+                raise ValueError(f"Stored {key} contains an invalid entity ID")
+        if not isinstance(values["conditions"], list) or not all(
+            isinstance(item, dict) for item in values["conditions"]
+        ):
+            raise ValueError("Stored conditions are invalid")
+        if values.get("description") is not None and not isinstance(values["description"], str):
+            raise ValueError("Stored description is invalid")
+        if values.get("job_key") is not None and not isinstance(values["job_key"], str):
+            raise ValueError("Stored job_key is invalid")
+        for key in ("attribution", "linkage"):
+            if not isinstance(values.get(key), dict):
+                raise ValueError(f"Stored {key} is invalid")
+        if not isinstance(values.get("revision"), int) or values["revision"] < 1:
+            raise ValueError("Stored revision is invalid")
         if (
             not values["terminal_reason"]
             and values.get("last_error")
@@ -167,6 +204,17 @@ class DeferredJob:
             "execute_within_grace",
         }:
             raise InvalidTimeError("Stored overdue_policy is invalid")
+        if values["overdue_grace"] is not None:
+            if not isinstance(values["overdue_grace"], dict):
+                raise InvalidTimeError("Stored overdue_grace is invalid")
+            try:
+                grace_seconds = timedelta(
+                    **{key: float(value) for key, value in values["overdue_grace"].items()}
+                ).total_seconds()
+            except (OverflowError, TypeError, ValueError) as err:
+                raise InvalidTimeError("Stored overdue_grace is invalid") from err
+            if grace_seconds < 0:
+                raise InvalidTimeError("Stored overdue_grace is invalid")
         if values["valid_until"] and values["valid_until"] <= values["execute_at"]:
             raise InvalidTimeError("Stored valid_until must be after execute_at")
         values["status"] = JobStatus(values["status"])

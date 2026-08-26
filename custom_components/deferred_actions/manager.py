@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -29,6 +31,7 @@ from .const import (
     CONF_SAFE_BLOCKED_ACTIONS,
     CONFLICT_CANCEL,
     CONFLICT_KEEP_ALL,
+    CONFLICT_MODES,
     CONFLICT_REJECT,
     CONFLICT_REPLACE,
     DEFAULT_OPTIONS,
@@ -69,6 +72,15 @@ from .storage import DeferredActionsStorage
 _LOGGER = logging.getLogger(__name__)
 
 
+@dataclass(slots=True)
+class _PreparedCreate:
+    """Validated create data reserved for a later atomic commit."""
+
+    job: DeferredJob
+    conflict_mode: str
+    reservation_token: str | None = None
+
+
 class DeferredActionsManager:
     """Own storage, scheduling, execution and all queue mutations."""
 
@@ -81,11 +93,17 @@ class DeferredActionsManager:
         self._lock = asyncio.Lock()
         self._cancel_next: Callable[[], None] | None = None
         self._listeners: set[Callable[[dict[str, Any]], None]] = set()
+        self._execution_tasks: set[asyncio.Task[Any]] = set()
+        self._create_reservations: dict[str, str] = {}
         self._unloaded = False
 
     @property
     def scheduler_active(self) -> bool:
         return self._cancel_next is not None
+
+    @property
+    def available(self) -> bool:
+        return not self._unloaded
 
     async def async_initialize(self) -> None:
         """Load storage, recover overdue jobs, and start scheduling."""
@@ -95,14 +113,30 @@ class DeferredActionsManager:
         async with self._lock:
             self._async_reschedule_locked()
 
-    async def async_unload(self) -> None:
+    async def async_unload(self) -> bool:
         """Stop callbacks and flush storage."""
         self._unloaded = True
         if self._cancel_next:
             self._cancel_next()
             self._cancel_next = None
+        tasks = tuple(self._execution_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=10)
+            if pending:
+                _LOGGER.warning(
+                    "%s deferred action execution task(s) did not stop during unload",
+                    len(pending),
+                )
+                self._unloaded = False
+                async with self._lock:
+                    self._async_reschedule_locked()
+                return False
         self._listeners.clear()
-        await self._storage.async_save(self.jobs)
+        async with self._lock:
+            await self._storage.async_save(self.jobs)
+        return True
 
     def update_options(self, options: dict[str, Any]) -> None:
         self.options = {**DEFAULT_OPTIONS, **options}
@@ -151,8 +185,11 @@ class DeferredActionsManager:
         for listener in tuple(self._listeners):
             listener(summary_event)
 
-    async def _save_and_schedule_locked(self) -> None:
-        await self._storage.async_delay_save(self.jobs)
+    async def _save_and_schedule_locked(self, *, durable: bool = False) -> None:
+        if durable:
+            await self._storage.async_save(self.jobs)
+        else:
+            await self._storage.async_delay_save(self.jobs)
         self._async_reschedule_locked()
 
     @callback
@@ -193,13 +230,27 @@ class DeferredActionsManager:
                     job.revision += 1
                     due.append(job)
                     self._notify("job_started", job)
-            await self._save_and_schedule_locked()
+            await self._save_and_schedule_locked(durable=bool(due))
         await asyncio.gather(
-            *(self._async_finish_execution(job) for job in due),
-            return_exceptions=True,
+            *(self._async_execute_tracked(job) for job in due), return_exceptions=True
         )
 
+    async def _async_execute_tracked(self, job: DeferredJob) -> dict[str, Any]:
+        """Run an execution in a task owned and cancellable by this manager."""
+        return await self.async_run_owned(
+            self._async_finish_execution(job), f"Deferred action execution: {job.id}"
+        )
+
+    async def async_run_owned(self, awaitable: Awaitable[Any], name: str) -> Any:
+        """Run manager-owned action work with unload cancellation."""
+        task = self.hass.async_create_task(awaitable, name)
+        self._execution_tasks.add(task)
+        task.add_done_callback(self._execution_tasks.discard)
+        return await task
+
     async def _async_finish_execution(self, job: DeferredJob) -> dict[str, Any]:
+        if self._unloaded:
+            return self._public(job)
         try:
             conditions_pass = await async_conditions_pass(self.hass, job)
             if conditions_pass:
@@ -234,6 +285,8 @@ class DeferredActionsManager:
                 terminal_reason = None
                 event = "job_completed"
         async with self._lock:
+            if self._unloaded:
+                return self._public(job)
             current = self.jobs.get(job.id)
             if current is None or current.status != JobStatus.EXECUTING:
                 return self._public(job)
@@ -243,7 +296,7 @@ class DeferredActionsManager:
             current.completed_at = utc_now()
             current.modified_at = current.completed_at
             current.revision += 1
-            await self._save_and_schedule_locked()
+            await self._save_and_schedule_locked(durable=True)
             self._notify(event, current)
             return self._public(current)
 
@@ -273,6 +326,8 @@ class DeferredActionsManager:
         if policy is not None and policy not in OVERDUE_POLICIES:
             raise InvalidTimeError(f"overdue_policy must be one of {', '.join(OVERDUE_POLICIES)}")
         if grace is not None:
+            if not isinstance(grace, dict):
+                raise InvalidTimeError("overdue_grace must be a duration object or null")
             try:
                 seconds = timedelta(
                     **{key: float(value) for key, value in grace.items()}
@@ -290,7 +345,7 @@ class DeferredActionsManager:
         try:
             parsed = datetime.fromisoformat(value) if isinstance(value, str) else value
             cutoff = ensure_utc(parsed, "valid_until")
-        except (TypeError, ValueError) as err:
+        except (AttributeError, TypeError, ValueError) as err:
             raise InvalidTimeError("valid_until is not a valid offset-aware timestamp") from err
         if cutoff <= execute_at:
             raise InvalidTimeError("valid_until must be after the scheduled execution time")
@@ -341,7 +396,7 @@ class DeferredActionsManager:
                 job.revision += 1
             await self._storage.async_save(self.jobs)
         await asyncio.gather(
-            *(self._async_finish_execution(job) for job in execute), return_exceptions=True
+            *(self._async_execute_tracked(job) for job in execute), return_exceptions=True
         )
 
     @staticmethod
@@ -358,14 +413,16 @@ class DeferredActionsManager:
                     else execute_at
                 )
                 result = ensure_utc(parsed)
-            except (ValueError, TypeError) as err:
+            except (AttributeError, ValueError, TypeError) as err:
                 raise InvalidTimeError("execute_at is not a valid offset-aware timestamp") from err
         else:
-            if not delay or not any(float(value) for value in delay.values()):
+            if not isinstance(delay, dict) or not delay:
                 raise InvalidTimeError("delay must be non-empty")
-            seconds = timedelta(
-                **{key: float(value) for key, value in delay.items()}
-            ).total_seconds()
+            try:
+                values = {key: float(value) for key, value in delay.items()}
+                seconds = timedelta(**values).total_seconds()
+            except (OverflowError, TypeError, ValueError) as err:
+                raise InvalidTimeError("delay is not a valid duration") from err
             if seconds <= 0:
                 raise InvalidTimeError("delay must be positive")
             result = utc_now() + timedelta(seconds=seconds)
@@ -373,7 +430,34 @@ class DeferredActionsManager:
             raise InvalidTimeError("execution time must be in the future")
         return result
 
-    async def async_create(
+    @staticmethod
+    def _validate_create_metadata(
+        *,
+        name: Any,
+        description: Any,
+        job_key: Any,
+        tags: Any,
+        target_entities: Any,
+        conflict_mode: Any,
+    ) -> tuple[str, list[str], list[str]]:
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("name must be a non-empty string")
+        if description is not None and not isinstance(description, str):
+            raise ValueError("description must be a string or null")
+        if job_key is not None and not isinstance(job_key, str):
+            raise ValueError("job_key must be a string or null")
+        if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+            raise ValueError("tags must be a list of strings")
+        if not isinstance(target_entities, list) or not all(
+            isinstance(entity_id, str) and valid_entity_id(entity_id)
+            for entity_id in target_entities
+        ):
+            raise ValueError("target_entities must be a list of valid entity IDs")
+        if conflict_mode not in CONFLICT_MODES:
+            raise ValueError(f"conflict_mode must be one of {', '.join(CONFLICT_MODES)}")
+        return name.strip(), list(tags), list(target_entities)
+
+    async def async_prepare_create(
         self,
         *,
         name: str,
@@ -393,9 +477,17 @@ class DeferredActionsManager:
         overdue_policy: str | None = None,
         overdue_grace: dict[str, float] | None = None,
         valid_until: str | datetime | None = None,
-    ) -> dict[str, Any]:
-        if not name.strip():
-            raise ValueError("name must not be empty")
+    ) -> _PreparedCreate:
+        """Validate and reserve a create without exposing or scheduling the job."""
+        mode = conflict_mode or self.options[CONF_DEFAULT_CONFLICT_MODE]
+        clean_name, clean_tags, clean_targets = self._validate_create_metadata(
+            name=name,
+            description=description,
+            job_key=job_key,
+            tags=[] if tags is None else tags,
+            target_entities=[] if target_entities is None else target_entities,
+            conflict_mode=mode,
+        )
         normalized = await async_validate_sequence(self.hass, sequence)
         normalized_conditions = await async_validate_conditions(self.hass, conditions)
         if condition_failure not in CONDITION_FAILURE_MODES:
@@ -407,71 +499,151 @@ class DeferredActionsManager:
         cutoff = self._parse_valid_until(valid_until, when)
         discovered_targets = extract_entity_ids(normalized)
         condition_entities = extract_entity_ids(normalized_conditions)
-        merged_targets = merge_entity_ids(discovered_targets, target_entities)
-        mode = conflict_mode or self.options[CONF_DEFAULT_CONFLICT_MODE]
+        merged_targets = merge_entity_ids(discovered_targets, clean_targets)
         now = utc_now()
+        job = DeferredJob(
+            id=uuid4().hex,
+            name=clean_name,
+            description=description,
+            execute_at=when,
+            sequence=normalized,
+            created_at=now,
+            modified_at=now,
+            job_key=job_key,
+            tags=clean_tags,
+            source=source,
+            target_entities=merged_targets,
+            explicit_target_entities=clean_targets,
+            condition_entities=condition_entities,
+            conditions=normalized_conditions,
+            condition_failure=condition_failure,
+            overdue_policy=overdue_policy,
+            overdue_grace=overdue_grace,
+            valid_until=cutoff,
+            attribution=dict(attribution or {}),
+            linkage=dict(linkage or {}),
+        )
+        reservation_token = None
         async with self._lock:
+            if self._unloaded:
+                raise ConflictError("The manager is unloading")
             matches = [
                 j
                 for j in self.jobs.values()
-                if job_key and j.job_key == job_key and j.status == JobStatus.PENDING
+                if job_key
+                and j.job_key == job_key
+                and j.status in {JobStatus.PENDING, JobStatus.PAUSED}
             ]
             if matches and mode == CONFLICT_REJECT:
-                raise ConflictError(f"A pending job already uses job_key {job_key}")
-            if matches and mode == CONFLICT_REPLACE:
-                job = max(matches, key=lambda item: item.created_at)
-                job.name = name.strip()
-                job.description = description
-                job.sequence = normalized
-                job.conditions = normalized_conditions
-                job.condition_failure = condition_failure
-                job.execute_at = when
-                job.valid_until = cutoff
-                job.overdue_policy = overdue_policy
-                job.overdue_grace = overdue_grace
-                job.tags = list(tags or [])
-                job.target_entities = merged_targets
-                job.explicit_target_entities = list(target_entities or [])
-                job.condition_entities = condition_entities
-                job.modified_at = now
-                job.revision += 1
-                await self._save_and_schedule_locked()
-                self._notify("job_updated", job)
-                return self._public(job)
-            if matches and mode == CONFLICT_CANCEL:
-                for existing in matches:
-                    existing.status = JobStatus.CANCELLED
-                    existing.completed_at = now
-                    existing.modified_at = now
-                    existing.revision += 1
-                    self._notify("job_cancelled", existing)
-            job = DeferredJob(
-                id=uuid4().hex,
-                name=name.strip(),
-                description=description,
-                execute_at=when,
-                sequence=normalized,
-                created_at=now,
-                modified_at=now,
-                job_key=job_key,
-                tags=list(tags or []),
-                source=source,
-                target_entities=list(target_entities or []),
-                explicit_target_entities=list(target_entities or []),
-                condition_entities=condition_entities,
-                conditions=normalized_conditions,
-                condition_failure=condition_failure,
-                overdue_policy=overdue_policy,
-                overdue_grace=overdue_grace,
-                valid_until=cutoff,
-                attribution=dict(attribution or {}),
-                linkage=dict(linkage or {}),
-            )
-            job.target_entities = merged_targets
-            self.jobs[job.id] = job
-            await self._save_and_schedule_locked()
-            self._notify("job_created", job)
-            return self._public(job)
+                raise ConflictError(f"An active job already uses job_key {job_key}")
+            if job_key and mode != CONFLICT_KEEP_ALL:
+                if job_key in self._create_reservations:
+                    raise ConflictError(f"Another create is in progress for job_key {job_key}")
+                reservation_token = uuid4().hex
+                self._create_reservations[job_key] = reservation_token
+        return _PreparedCreate(job, mode, reservation_token)
+
+    async def async_abort_create(self, prepared: _PreparedCreate) -> None:
+        """Release a create reservation after its surrounding operation failed."""
+        if prepared.reservation_token is None or prepared.job.job_key is None:
+            return
+        async with self._lock:
+            if self._create_reservations.get(prepared.job.job_key) == prepared.reservation_token:
+                del self._create_reservations[prepared.job.job_key]
+
+    async def async_commit_create(self, prepared: _PreparedCreate) -> dict[str, Any]:
+        """Commit a previously validated create atomically and durably."""
+        candidate = prepared.job
+        mode = prepared.conflict_mode
+        async with self._lock:
+            if self._unloaded:
+                raise ConflictError("The manager is unloading")
+            if prepared.reservation_token is not None and (
+                candidate.job_key is None
+                or self._create_reservations.get(candidate.job_key) != prepared.reservation_token
+            ):
+                raise ConflictError("The create reservation is no longer valid")
+            try:
+                matches = [
+                    job
+                    for job in self.jobs.values()
+                    if candidate.job_key
+                    and job.job_key == candidate.job_key
+                    and job.status in {JobStatus.PENDING, JobStatus.PAUSED}
+                ]
+                now = utc_now()
+                snapshots = {job.id: deepcopy(job) for job in matches}
+                cancelled: list[DeferredJob] = []
+                try:
+                    if matches and mode == CONFLICT_REPLACE:
+                        job = max(matches, key=lambda item: item.created_at)
+                        for existing in matches:
+                            if existing.id == job.id:
+                                continue
+                            existing.status = JobStatus.CANCELLED
+                            existing.completed_at = now
+                            existing.modified_at = now
+                            existing.revision += 1
+                            cancelled.append(existing)
+                        job.name = candidate.name
+                        job.description = candidate.description
+                        job.sequence = candidate.sequence
+                        job.conditions = candidate.conditions
+                        job.condition_failure = candidate.condition_failure
+                        job.execute_at = candidate.execute_at
+                        job.valid_until = candidate.valid_until
+                        job.overdue_policy = candidate.overdue_policy
+                        job.overdue_grace = candidate.overdue_grace
+                        job.tags = candidate.tags
+                        job.target_entities = candidate.target_entities
+                        job.explicit_target_entities = candidate.explicit_target_entities
+                        job.condition_entities = candidate.condition_entities
+                        job.status = JobStatus.PENDING
+                        job.completed_at = None
+                        job.last_error = None
+                        job.terminal_reason = None
+                        job.modified_at = now
+                        job.revision += 1
+                        await self._save_and_schedule_locked(durable=True)
+                        for existing in cancelled:
+                            self._notify("job_cancelled", existing)
+                        self._notify("job_updated", job)
+                        return self._public(job)
+                    if matches and mode == CONFLICT_CANCEL:
+                        for existing in matches:
+                            existing.status = JobStatus.CANCELLED
+                            existing.completed_at = now
+                            existing.modified_at = now
+                            existing.revision += 1
+                            cancelled.append(existing)
+                    self.jobs[candidate.id] = candidate
+                    await self._save_and_schedule_locked(durable=True)
+                    for existing in cancelled:
+                        self._notify("job_cancelled", existing)
+                    self._notify("job_created", candidate)
+                    return self._public(candidate)
+                except BaseException:
+                    self.jobs.pop(candidate.id, None)
+                    self.jobs.update(snapshots)
+                    self._async_reschedule_locked()
+                    raise
+            finally:
+                if (
+                    prepared.reservation_token is not None
+                    and candidate.job_key is not None
+                    and self._create_reservations.get(candidate.job_key)
+                    == prepared.reservation_token
+                ):
+                    del self._create_reservations[candidate.job_key]
+
+    async def async_create(self, **kwargs: Any) -> dict[str, Any]:
+        """Validate and commit a new deferred action."""
+        prepared = await self.async_prepare_create(**kwargs)
+        try:
+            return await self.async_commit_create(prepared)
+        except BaseException:
+            await self.async_abort_create(prepared)
+            raise
 
     @staticmethod
     def _contains_template(value: Any) -> bool:
@@ -691,22 +863,6 @@ class DeferredActionsManager:
     async def async_update(
         self, job_id: str, expected_revision: int | None = None, **changes: Any
     ) -> dict[str, Any]:
-        sequence = changes.get("sequence")
-        if sequence is not None:
-            changes["sequence"] = await async_validate_sequence(self.hass, sequence)
-        if "conditions" in changes:
-            changes["conditions"] = await async_validate_conditions(
-                self.hass, changes["conditions"]
-            )
-        if (
-            "condition_failure" in changes
-            and changes["condition_failure"] not in CONDITION_FAILURE_MODES
-        ):
-            raise InvalidConditionError(
-                f"condition_failure must be one of {', '.join(CONDITION_FAILURE_MODES)}"
-            )
-        if "overdue_policy" in changes or "overdue_grace" in changes:
-            self._validate_overdue(changes.get("overdue_policy"), changes.get("overdue_grace"))
         allowed = {
             "name",
             "description",
@@ -720,7 +876,55 @@ class DeferredActionsManager:
             "overdue_grace",
             "valid_until",
         }
-        validated_changes = {key: value for key, value in changes.items() if key in allowed}
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError(f"Unknown update fields: {', '.join(sorted(unknown))}")
+        if not changes:
+            raise ValueError("At least one update field is required")
+        if "name" in changes:
+            if not isinstance(changes["name"], str) or not changes["name"].strip():
+                raise ValueError("name must be a non-empty string")
+            changes["name"] = changes["name"].strip()
+        if (
+            "description" in changes
+            and changes["description"] is not None
+            and not isinstance(changes["description"], str)
+        ):
+            raise ValueError("description must be a string or null")
+        if (
+            "job_key" in changes
+            and changes["job_key"] is not None
+            and not isinstance(changes["job_key"], str)
+        ):
+            raise ValueError("job_key must be a string or null")
+        if "tags" in changes and (
+            not isinstance(changes["tags"], list)
+            or not all(isinstance(tag, str) for tag in changes["tags"])
+        ):
+            raise ValueError("tags must be a list of strings")
+        if "target_entities" in changes and (
+            not isinstance(changes["target_entities"], list)
+            or not all(
+                isinstance(entity_id, str) and valid_entity_id(entity_id)
+                for entity_id in changes["target_entities"]
+            )
+        ):
+            raise ValueError("target_entities must be a list of valid entity IDs")
+        if "sequence" in changes:
+            changes["sequence"] = await async_validate_sequence(self.hass, changes["sequence"])
+        if "conditions" in changes:
+            changes["conditions"] = await async_validate_conditions(
+                self.hass, changes["conditions"]
+            )
+        if (
+            "condition_failure" in changes
+            and changes["condition_failure"] not in CONDITION_FAILURE_MODES
+        ):
+            raise InvalidConditionError(
+                f"condition_failure must be one of {', '.join(CONDITION_FAILURE_MODES)}"
+            )
+        if "overdue_policy" in changes or "overdue_grace" in changes:
+            self._validate_overdue(changes.get("overdue_policy"), changes.get("overdue_grace"))
         async with self._lock:
             job = self.resolve(job_id=job_id)
             if job.status not in {JobStatus.PENDING, JobStatus.PAUSED}:
@@ -729,13 +933,15 @@ class DeferredActionsManager:
                 raise RevisionConflictError(
                     f"Expected revision {expected_revision}, current revision is {job.revision}"
                 )
-            if "valid_until" in validated_changes:
-                validated_changes["valid_until"] = self._parse_valid_until(
-                    validated_changes["valid_until"], job.execute_at
+            if "job_key" in changes and changes["job_key"] in self._create_reservations:
+                raise ConflictError("A create is in progress for that job_key")
+            if "valid_until" in changes:
+                changes["valid_until"] = self._parse_valid_until(
+                    changes["valid_until"], job.execute_at
                 )
-            for key, value in validated_changes.items():
+            for key, value in changes.items():
                 setattr(job, key, value)
-            if sequence is not None or "target_entities" in changes:
+            if "sequence" in changes or "target_entities" in changes:
                 if "target_entities" in changes:
                     job.explicit_target_entities = list(changes["target_entities"] or [])
                 job.target_entities = merge_entity_ids(
@@ -907,9 +1113,9 @@ class DeferredActionsManager:
             job.terminal_reason = None
             job.modified_at = now
             job.revision += 1
-            await self._save_and_schedule_locked()
+            await self._save_and_schedule_locked(durable=True)
             self._notify("job_started", job)
-        return await self._async_finish_execution(job)
+        return await self._async_execute_tracked(job)
 
     async def async_delete(self, job_id: str) -> dict[str, Any]:
         async with self._lock:
@@ -1004,6 +1210,8 @@ class DeferredActionsManager:
             cutoff = utc_now() - timedelta(days=self.options[CONF_HISTORY_RETENTION_DAYS])
             maximum = self.options[CONF_MAX_HISTORY_RECORDS]
         async with self._lock:
+            if self._unloaded:
+                return {"deleted_count": 0}
             history = sorted(
                 (j for j in self.jobs.values() if j.status in HISTORY_STATUSES),
                 key=lambda j: j.completed_at or j.modified_at,

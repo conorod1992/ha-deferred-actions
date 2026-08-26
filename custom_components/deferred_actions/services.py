@@ -47,9 +47,10 @@ _DURATION_SCHEMA = vol.Schema(
 _TIMESTAMP = vol.Any(str, datetime)
 _NULLABLE_TIMESTAMP = vol.Any(None, str, datetime)
 _OVERDUE_POLICY = vol.In(("execute", "skip", "execute_within_grace"))
+_NONEMPTY_STRING = vol.All(str, lambda value: value.strip(), vol.Length(min=1))
 
 _CREATE_FIELDS = {
-    vol.Required("name"): str,
+    vol.Required("name"): _NONEMPTY_STRING,
     vol.Required("sequence"): list,
     vol.Optional("execute_at"): _TIMESTAMP,
     vol.Optional("delay"): _DURATION_SCHEMA,
@@ -58,10 +59,18 @@ _CREATE_FIELDS = {
     vol.Optional("overdue_policy"): _OVERDUE_POLICY,
     vol.Optional("overdue_grace"): _DURATION_SCHEMA,
     vol.Optional("valid_until"): _TIMESTAMP,
+    vol.Optional("description"): vol.Any(None, str),
+    vol.Optional("job_key"): vol.Any(None, str),
+    vol.Optional("tags"): [str],
+    vol.Optional("source"): str,
+    vol.Optional("target_entities"): [str],
+    vol.Optional("conflict_mode"): vol.In(
+        ("keep_all", "replace_same_key", "cancel_same_key", "reject_same_key")
+    ),
 }
 
 SERVICE_SCHEMAS = {
-    "create": vol.Schema(_CREATE_FIELDS, extra=vol.ALLOW_EXTRA),
+    "create": vol.Schema(_CREATE_FIELDS, extra=vol.PREVENT_EXTRA),
     "create_safe": vol.Schema(
         {
             vol.Required("name"): str,
@@ -87,6 +96,11 @@ SERVICE_SCHEMAS = {
         {
             vol.Required("job_id"): str,
             vol.Optional("expected_revision"): vol.All(vol.Coerce(int), vol.Range(min=1)),
+            vol.Optional("name"): _NONEMPTY_STRING,
+            vol.Optional("description"): vol.Any(None, str),
+            vol.Optional("sequence"): list,
+            vol.Optional("job_key"): vol.Any(None, str),
+            vol.Optional("tags"): [str],
             vol.Optional("conditions"): vol.Any(None, list),
             vol.Optional("condition_failure"): vol.In(("skip", "cancel", "fail")),
             vol.Optional("overdue_policy"): vol.Any(None, _OVERDUE_POLICY),
@@ -94,7 +108,7 @@ SERVICE_SCHEMAS = {
             vol.Optional("valid_until"): _NULLABLE_TIMESTAMP,
             vol.Optional("target_entities"): list,
         },
-        extra=vol.ALLOW_EXTRA,
+        extra=vol.PREVENT_EXTRA,
     ),
     "reschedule": vol.Schema(
         {
@@ -122,9 +136,14 @@ SERVICE_SCHEMAS = {
 
 def _manager(hass: HomeAssistant):
     entries = hass.config_entries.async_entries(DOMAIN)
-    if not entries or not hasattr(entries[0], "runtime_data"):
-        raise HomeAssistantError("Deferred Actions is not configured")
-    return entries[0].runtime_data.manager
+    for entry in entries:
+        try:
+            manager = entry.runtime_data.manager
+        except (AttributeError, RuntimeError):
+            continue
+        if manager.available:
+            return manager
+    raise HomeAssistantError("Deferred Actions is not configured")
 
 
 def _attribution(call: ServiceCall, source: str) -> dict[str, Any]:
@@ -171,9 +190,7 @@ async def async_run_for(
         end_sequence = [{"action": end_action, "target": {"entity_id": entities}}]
     start_sequence = await async_validate_sequence(manager.hass, start_sequence)
     end_sequence = await async_validate_sequence(manager.hass, end_sequence)
-    script = Script(manager.hass, start_sequence, "Deferred Actions run-for start", DOMAIN)
-    await script.async_run(context=context)
-    return await manager.async_create(
+    prepared = await manager.async_prepare_create(
         name=data.get("name", "Run for timer"),
         description=data.get("description"),
         delay=duration,
@@ -186,6 +203,15 @@ async def async_run_for(
         attribution=attribution,
         linkage={"operation": "run_for", "start_action": start_action, "end_action": end_action},
     )
+    script = Script(manager.hass, start_sequence, "Deferred Actions run-for start", DOMAIN)
+    try:
+        await manager.async_run_owned(
+            script.async_run(context=context), "Deferred Actions run-for start"
+        )
+        return await manager.async_commit_create(prepared)
+    except BaseException:
+        await manager.async_abort_create(prepared)
+        raise
 
 
 async def _async_handle_service(hass: HomeAssistant, call: ServiceCall):
@@ -264,7 +290,7 @@ async def async_register_services(hass: HomeAssistant) -> None:
                 name,
                 lambda call, _hass=hass: _async_handle_service(_hass, call),
                 schema=SERVICE_SCHEMAS.get(name, vol.Schema({}, extra=vol.ALLOW_EXTRA)),
-                supports_response=SupportsResponse.ONLY,
+                supports_response=SupportsResponse.OPTIONAL,
             )
 
 

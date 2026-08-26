@@ -1,5 +1,7 @@
 """Scheduler, operations, races, overdue and persistence tests."""
 
+import asyncio
+from contextlib import suppress
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -8,6 +10,7 @@ import pytest
 from custom_components.deferred_actions.manager import DeferredActionsManager
 from custom_components.deferred_actions.models import (
     BulkConfirmationError,
+    ConflictError,
     InvalidStatusError,
     InvalidTimeError,
     JobStatus,
@@ -110,6 +113,62 @@ async def test_due_jobs_execute_independently(manager) -> None:
     assert manager.jobs[one["id"]].terminal_reason is None
 
 
+async def test_due_execution_is_durable_before_action_starts(manager) -> None:
+    job = await create(manager)
+    manager.jobs[job["id"]].execute_at = utc_now() - timedelta(seconds=1)
+    manager._storage.async_save.reset_mock()
+    manager._storage.async_delay_save.reset_mock()
+
+    async def assert_claim_saved(_hass, stored_job) -> None:
+        assert manager._storage.async_save.await_count == 1
+        assert stored_job.status == JobStatus.EXECUTING
+
+    with patch(
+        "custom_components.deferred_actions.manager.async_execute_job",
+        AsyncMock(side_effect=assert_claim_saved),
+    ):
+        await manager._async_due_callback(utc_now())
+
+    assert manager._storage.async_save.await_count == 2
+    manager._storage.async_delay_save.assert_not_awaited()
+
+
+async def test_create_is_durably_saved_before_return(manager) -> None:
+    manager._storage.async_save.reset_mock()
+    manager._storage.async_delay_save.reset_mock()
+    await create(manager)
+    manager._storage.async_save.assert_awaited_once()
+    manager._storage.async_delay_save.assert_not_awaited()
+
+
+async def test_unload_cancels_owned_in_flight_execution(manager) -> None:
+    job = await create(manager)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def wait_forever(_hass, _job) -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    with patch(
+        "custom_components.deferred_actions.manager.async_execute_job",
+        AsyncMock(side_effect=wait_forever),
+    ):
+        execution = asyncio.create_task(manager.async_execute_now(job["id"]))
+        await started.wait()
+        await manager.async_unload()
+        with suppress(asyncio.CancelledError):
+            await execution
+
+    assert cancelled.is_set()
+    assert not manager.available
+    assert manager.jobs[job["id"]].status == JobStatus.EXECUTING
+
+
 async def test_bulk_requires_confirmation_and_selector(manager) -> None:
     await create(manager)
     with pytest.raises(BulkConfirmationError):
@@ -127,6 +186,22 @@ async def test_conflict_modes(manager) -> None:
     )
     assert replaced["id"] == first["id"]
     assert replaced["name"] == "Replacement"
+
+
+async def test_conflicts_include_paused_and_all_same_key_matches(manager) -> None:
+    first = await create(manager, job_key="heater", conflict_mode="keep_all")
+    second = await create(manager, job_key="heater", conflict_mode="keep_all")
+    await manager.async_pause(first["id"])
+
+    with pytest.raises(ConflictError):
+        await create(manager, job_key="heater", conflict_mode="reject_same_key")
+
+    replaced = await create(
+        manager, name="Replacement", job_key="heater", conflict_mode="replace_same_key"
+    )
+    assert replaced["id"] == second["id"]
+    assert manager.jobs[first["id"]].status == JobStatus.CANCELLED
+    assert manager.jobs[second["id"]].status == JobStatus.PENDING
 
 
 async def test_list_filters_and_json_data(manager) -> None:
@@ -395,6 +470,26 @@ async def test_update_clears_nullable_overrides(manager) -> None:
     assert updated["conditions"] == []
     assert updated["condition_entities"] == []
     assert updated["explicit_target_entities"] == []
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"name": "   "},
+        {"tags": "not-a-list"},
+        {"tags": ["ok", 4]},
+        {"target_entities": "light.office"},
+        {"target_entities": ["not an entity"]},
+        {"description": 42},
+        {"job_key": ["bad"]},
+        {"unknown": True},
+    ],
+)
+async def test_update_rejects_malformed_fields_without_mutation(manager, changes) -> None:
+    job = await create(manager)
+    with pytest.raises(ValueError):
+        await manager.async_update(job["id"], **changes)
+    assert manager.jobs[job["id"]].revision == 1
 
 
 async def test_valid_until_remains_consistent_during_edits(manager) -> None:

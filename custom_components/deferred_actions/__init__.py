@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ from .services import async_register_services, async_unregister_services
 from .websocket import async_register_websocket_commands
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -42,47 +44,84 @@ DeferredActionsConfigEntry = ConfigEntry[DeferredActionsRuntimeData]
 async def async_setup_entry(hass: HomeAssistant, entry: DeferredActionsConfigEntry) -> bool:
     """Set up Deferred Actions from a config entry."""
     manager = DeferredActionsManager(hass, dict(entry.options))
-    await manager.async_initialize()
     runtime = DeferredActionsRuntimeData(manager=manager)
     entry.runtime_data = runtime
+    unsubscribers = []
+    cleanup_running = False
 
-    await async_register_services(hass)
-    async_register_websocket_commands(hass)
-    entry.async_on_unload(
-        async_track_time_interval(
-            hass, lambda _now: manager.async_cleanup_history(), HISTORY_CLEANUP_INTERVAL
+    async def _async_periodic_cleanup(_now) -> None:
+        nonlocal cleanup_running
+        if cleanup_running:
+            return
+        cleanup_running = True
+        try:
+            await manager.async_cleanup_history()
+        finally:
+            cleanup_running = False
+
+    try:
+        await manager.async_initialize()
+        await async_register_services(hass)
+        async_register_websocket_commands(hass)
+        unsubscribers.append(
+            async_track_time_interval(hass, _async_periodic_cleanup, HISTORY_CLEANUP_INTERVAL)
         )
-    )
-    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+        unsubscribers.append(entry.add_update_listener(_async_options_updated))
 
-    options = {**DEFAULT_OPTIONS, **entry.options}
-    if options[CONF_PANEL_ENABLED]:
-        static_marker = "_deferred_actions_static_registered"
-        if not hass.data.get(static_marker):
-            frontend_dir = Path(__file__).parent / "frontend"
-            await hass.http.async_register_static_paths(
-                [StaticPathConfig("/deferred_actions_frontend", str(frontend_dir), True)]
+        options = {**DEFAULT_OPTIONS, **entry.options}
+        if options[CONF_PANEL_ENABLED]:
+            static_marker = "_deferred_actions_static_registered"
+            if not hass.data.get(static_marker):
+                frontend_dir = Path(__file__).parent / "frontend"
+                await hass.http.async_register_static_paths(
+                    [StaticPathConfig("/deferred_actions_frontend", str(frontend_dir), True)]
+                )
+                hass.data[static_marker] = True
+            frontend.async_register_built_in_panel(
+                hass,
+                component_name="custom",
+                sidebar_title="Deferred Actions",
+                sidebar_icon="mdi:calendar-clock",
+                frontend_url_path=PANEL_URL,
+                config={
+                    "_panel_custom": {
+                        "name": PANEL_COMPONENT,
+                        "module_url": PANEL_JS_URL,
+                        "embed_iframe": False,
+                        "trust_external": False,
+                    }
+                },
+                require_admin=True,
             )
-            hass.data[static_marker] = True
-        frontend.async_register_built_in_panel(
-            hass,
-            component_name="custom",
-            sidebar_title="Deferred Actions",
-            sidebar_icon="mdi:calendar-clock",
-            frontend_url_path=PANEL_URL,
-            config={
-                "_panel_custom": {
-                    "name": PANEL_COMPONENT,
-                    "module_url": PANEL_JS_URL,
-                    "embed_iframe": False,
-                    "trust_external": False,
-                }
-            },
-            require_admin=True,
-        )
-        runtime.panel_registered = True
+            runtime.panel_registered = True
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except BaseException:
+        try:
+            await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+        except Exception:
+            _LOGGER.exception("Error unloading Deferred Actions platforms after setup failure")
+        for unsubscribe in reversed(unsubscribers):
+            try:
+                unsubscribe()
+            except Exception:
+                _LOGGER.exception("Error removing Deferred Actions setup callback")
+        if runtime.panel_registered:
+            try:
+                frontend.async_remove_panel(hass, PANEL_URL)
+            except Exception:
+                _LOGGER.exception("Error removing Deferred Actions panel after setup failure")
+        try:
+            await async_unregister_services(hass)
+        except Exception:
+            _LOGGER.exception("Error unregistering Deferred Actions services after setup failure")
+        try:
+            await manager.async_unload()
+        except Exception:
+            _LOGGER.exception("Error unloading Deferred Actions manager after setup failure")
+        raise
+    for unsubscribe in unsubscribers:
+        entry.async_on_unload(unsubscribe)
     return True
 
 
@@ -97,9 +136,10 @@ async def _async_options_updated(hass: HomeAssistant, entry: DeferredActionsConf
 
 async def async_unload_entry(hass: HomeAssistant, entry: DeferredActionsConfigEntry) -> bool:
     """Unload the entry and all owned resources."""
+    if not await entry.runtime_data.manager.async_unload():
+        return False
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
-    await entry.runtime_data.manager.async_unload()
     if entry.runtime_data.panel_registered:
         frontend.async_remove_panel(hass, PANEL_URL)
     await async_unregister_services(hass)
