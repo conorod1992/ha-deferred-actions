@@ -122,25 +122,27 @@ async def test_failed_platform_unload_leaves_manager_fully_operational(hass, moc
     entry.runtime_data = SimpleNamespace(manager=manager, panel_registered=True)
     unregister = AsyncMock()
 
-    with (
-        patch.object(
-            hass.config_entries,
-            "async_unload_platforms",
-            AsyncMock(return_value=False),
-        ),
-        patch("custom_components.deferred_actions.async_unregister_services", unregister),
-        patch("custom_components.deferred_actions.frontend.async_remove_panel") as remove_panel,
-        patch.object(manager, "async_unload", wraps=manager.async_unload) as manager_unload,
-    ):
-        assert not await async_unload_entry(hass, entry)
+    try:
+        with (
+            patch.object(
+                hass.config_entries,
+                "async_unload_platforms",
+                AsyncMock(return_value=False),
+            ),
+            patch("custom_components.deferred_actions.async_unregister_services", unregister),
+            patch("homeassistant.components.frontend.async_remove_panel") as remove_panel,
+            patch.object(manager, "async_unload", wraps=manager.async_unload) as manager_unload,
+        ):
+            assert not await async_unload_entry(hass, entry)
 
-    manager_unload.assert_not_awaited()
-    unregister.assert_not_awaited()
-    remove_panel.assert_not_called()
-    assert manager.available
-    assert manager.scheduler_active
-    assert listener in manager._listeners
+        manager_unload.assert_not_awaited()
+        unregister.assert_not_awaited()
+        remove_panel.assert_not_called()
+        assert manager.available
+        assert manager.scheduler_active
+        assert listener in manager._listeners
 
-    await manager.async_cancel(job["id"])
-    listener.assert_called()
-    await manager.async_unload()
+        await manager.async_cancel(job["id"])
+        listener.assert_called()
+    finally:
+        await manager.async_unload()
