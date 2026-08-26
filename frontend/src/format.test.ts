@@ -56,6 +56,18 @@ describe("job presentation", () => {
     ]);
   });
 
+  it("keeps paused jobs out of execution-time buckets", () => {
+    const job = (id: string, status: DeferredJob["status"], execute_at: string) => ({ id, status, execute_at } as DeferredJob);
+    const groups = groupActiveJobs([
+      job("paused", "paused", "2026-01-01T07:00:00Z"),
+      job("pending", "pending", "2026-01-01T08:30:00Z"),
+    ], new Date("2026-01-01T08:00:00Z"), "UTC");
+    expect(groups.map((group) => [group.label, group.jobs.map((item) => item.id)])).toEqual([
+      ["Paused", ["paused"]],
+      ["Next", ["pending"]],
+    ]);
+  });
+
   it("searches user-facing metadata and resolved targets", () => {
     const job = { name: "Office heater", description: "Warm morning", job_key: "heat-office", tags: ["climate"], target_entities: ["switch.office"], explicit_target_entities: [] } as unknown as DeferredJob;
     expect(matchesJobSearch(job, "HEAT-OFFICE")).toBe(true);

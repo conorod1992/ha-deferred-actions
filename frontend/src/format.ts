@@ -21,7 +21,7 @@ const dateKey = (value: Date, timeZone: string): string => {
   return `${part("year")}-${part("month")}-${part("day")}`;
 };
 
-export type QueueGroup = "Overdue" | "Next" | "Later today" | "Tomorrow" | "Later";
+export type QueueGroup = "Paused" | "Overdue" | "Next" | "Later today" | "Tomorrow" | "Later";
 export const groupActiveJobs = (jobs: DeferredJob[], now = new Date(), timeZone = "UTC"): { label: QueueGroup; jobs: DeferredJob[] }[] => {
   const ordered = [...jobs].sort((a, b) => a.execute_at.localeCompare(b.execute_at));
   const today = dateKey(now, timeZone);
@@ -32,12 +32,13 @@ export const groupActiveJobs = (jobs: DeferredJob[], now = new Date(), timeZone 
   for (const job of ordered) {
     const time = new Date(job.execute_at);
     let label: QueueGroup;
-    if (time.getTime() < now.getTime()) label = "Overdue";
+    if (job.status === "paused") label = "Paused";
+    else if (time.getTime() < now.getTime()) label = "Overdue";
     else if (!usedNext) { label = "Next"; usedNext = true; }
     else { const key = dateKey(time, timeZone); label = key === today ? "Later today" : key === tomorrow ? "Tomorrow" : "Later"; }
     groups.set(label, [...(groups.get(label) ?? []), job]);
   }
-  return (["Overdue", "Next", "Later today", "Tomorrow", "Later"] as QueueGroup[]).flatMap((label) => groups.has(label) ? [{ label, jobs: groups.get(label)! }] : []);
+  return (["Paused", "Overdue", "Next", "Later today", "Tomorrow", "Later"] as QueueGroup[]).flatMap((label) => groups.has(label) ? [{ label, jobs: groups.get(label)! }] : []);
 };
 
 export const matchesJobSearch = (job: DeferredJob, query: string): boolean => {

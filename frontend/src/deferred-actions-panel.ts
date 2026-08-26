@@ -37,6 +37,10 @@ export class DeferredActionsPanel extends LitElement {
   @state() private conditionMode: EditorMode = "visual";
   @state() private visualConditions: VisualConditions = { operator: "and", items: [] };
   @state() private conditionsYaml = "";
+  @state() private conditionFailure: "skip" | "cancel" | "fail" = "skip";
+  @state() private overduePolicy = "";
+  @state() private overdueGraceMinutes = "";
+  @state() private validUntil = "";
   @state() private runForTarget: VisualTarget = {};
   @state() private runForStart = "light.turn_on";
   @state() private runForEnd = "light.turn_off";
@@ -150,6 +154,10 @@ export class DeferredActionsPanel extends LitElement {
     this.visualConditions = visualConditions;
     this.conditionMode = "visual";
     this.conditionsYaml = job?.conditions.length ? dump(job.conditions, { noRefs: true }) : "";
+    this.conditionFailure = job?.condition_failure ?? "skip";
+    this.overduePolicy = job?.overdue_policy ?? "";
+    this.overdueGraceMinutes = job?.overdue_grace ? String(job.effective_overdue_grace_minutes) : "";
+    this.validUntil = job?.valid_until_local?.slice(0, 16) ?? "";
     this.scheduleMode = "delay";
     this.creationKind = "later";
     this.jobKey = job?.job_key ?? "";
@@ -317,10 +325,10 @@ export class DeferredActionsPanel extends LitElement {
       <label>Description<textarea name="description">${job?.description ?? ""}</textarea></label>
       <div class="section-head"><h3>Only run this action if…</h3><button type="button" class="link" @click=${() => this.switchConditionMode()}>${this.conditionMode === "visual" ? "Edit in YAML" : "Use visual editor"}</button></div>
       ${this.conditionMode === "visual" ? this.renderVisualConditions() : html`<label>Conditions YAML<textarea class="yaml small-yaml" .value=${this.conditionsYaml} @input=${(event: InputEvent) => { this.conditionsYaml = (event.currentTarget as HTMLTextAreaElement).value; }}></textarea><small>Existing and advanced Home Assistant conditions are preserved here.</small></label>`}
-      <label>If the conditions aren’t met<select name="condition_failure"><option value="skip" ?selected=${!job || job.condition_failure === "skip"}>Skip this run and keep it in history</option><option value="cancel" ?selected=${job?.condition_failure === "cancel"}>Cancel the action</option><option value="fail" ?selected=${job?.condition_failure === "fail"}>Mark the action as failed</option></select></label>
-      <label>Don’t run after<input name="valid_until" type="datetime-local" .value=${job?.valid_until_local?.slice(0, 16) ?? ""}><small>The action will never begin at or after this cutoff.</small></label>
-      <label>If Home Assistant was offline when this was due<select name="overdue_policy"><option value="" ?selected=${!job?.overdue_policy}>Use the integration default</option><option value="execute" ?selected=${job?.overdue_policy === "execute"}>Run it when Home Assistant comes back</option><option value="execute_within_grace" ?selected=${job?.overdue_policy === "execute_within_grace"}>Run it only if it is less than the grace period late</option><option value="skip" ?selected=${job?.overdue_policy === "skip"}>Don’t run it</option></select></label>
-      <label>Grace period (minutes)<input name="overdue_grace_minutes" type="number" min="0" .value=${job?.overdue_grace ? String(job.effective_overdue_grace_minutes) : ""} placeholder="Use integration default"><small>Used only for “less than the grace period late”.</small></label>
+      <label>If the conditions aren’t met<select name="condition_failure" .value=${this.conditionFailure} @change=${(event: Event) => { this.conditionFailure = (event.currentTarget as HTMLSelectElement).value as "skip" | "cancel" | "fail"; }}><option value="skip">Skip this run and keep it in history</option><option value="cancel">Cancel the action</option><option value="fail">Mark the action as failed</option></select></label>
+      <label>Don’t run after<input name="valid_until" type="datetime-local" .value=${this.validUntil} @input=${(event: InputEvent) => { this.validUntil = (event.currentTarget as HTMLInputElement).value; }}><small>The action will never begin at or after this cutoff.</small></label>
+      <label>If Home Assistant was offline when this was due<select name="overdue_policy" .value=${this.overduePolicy} @change=${(event: Event) => { this.overduePolicy = (event.currentTarget as HTMLSelectElement).value; }}><option value="">Use the integration default</option><option value="execute">Run it when Home Assistant comes back</option><option value="execute_within_grace">Run it only if it is less than the grace period late</option><option value="skip">Don’t run it</option></select></label>
+      <label>Grace period (minutes)<input name="overdue_grace_minutes" type="number" min="0" .value=${this.overdueGraceMinutes} @input=${(event: InputEvent) => { this.overdueGraceMinutes = (event.currentTarget as HTMLInputElement).value; }} placeholder="Use integration default"><small>Used only for “less than the grace period late”.</small></label>
     </section>`;
   }
 
@@ -477,16 +485,36 @@ export class DeferredActionsPanel extends LitElement {
   }
 
   private editorPreview(job?: DeferredJob): string {
-    const sequence = this.editor?.mode === "visual" ? visualToSequence(this.visualActions) : (() => { try { const value = load(this.actionYaml); return Array.isArray(value) ? value as Record<string, unknown>[] : []; } catch { return []; } })();
+    const sequence = this.editor?.mode === "visual" ? visualToSequence(this.visualActions) : this.previewYamlList(this.actionYaml);
     if (this.creationKind === "run_for" && !job) return buildJobPreview({ sequence: [], when: "Now", runFor: { start: this.runForStart, end: this.runForEnd, duration: `${this.previewDelay} ${this.previewUnit}` } });
+    if (!sequence) return "Preview unavailable until the action YAML is a valid list.";
+    const conditions = this.conditionMode === "visual" ? visualToConditions(this.visualConditions) : this.previewYamlList(this.conditionsYaml);
+    if (!conditions) return "Preview unavailable until the conditions YAML is a valid list.";
     return buildJobPreview({
-      sequence: job?.sequence ?? sequence,
+      sequence,
       when: job ? `Scheduled for ${localDate(job.execute_at, this.timeZone)}` : this.scheduleMode === "delay" ? `In ${this.previewDelay} ${this.previewUnit}` : "At the selected date and time",
-      hasConditions: job?.has_conditions ?? this.visualConditions.items.length > 0,
-      conditionFailure: job?.condition_failure ?? "skip",
-      overdue: job ? effectiveOverdueLabel(job) : "Offline handling follows the selected policy",
-      validUntil: job?.valid_until ? localDate(job.valid_until, this.timeZone) : undefined,
+      hasConditions: conditions.length > 0,
+      conditionFailure: this.conditionFailure,
+      overdue: this.previewOverdueLabel(),
+      validUntil: this.validUntil ? this.previewValidUntil() : undefined,
     });
+  }
+
+  private previewYamlList(value: string): Record<string, unknown>[] | undefined {
+    try { const loaded = value.trim() ? load(value) : []; return Array.isArray(loaded) ? loaded as Record<string, unknown>[] : undefined; }
+    catch { return undefined; }
+  }
+
+  private previewOverdueLabel(): string {
+    if (!this.overduePolicy) return "Offline handling follows the integration default";
+    if (this.overduePolicy === "execute") return "Run when Home Assistant comes back";
+    if (this.overduePolicy === "skip") return "Don’t run when Home Assistant comes back";
+    return this.overdueGraceMinutes ? `Run only if less than ${this.overdueGraceMinutes} minutes late` : "Run only within the configured grace period";
+  }
+
+  private previewValidUntil(): string | undefined {
+    const value = new Date(this.validUntil);
+    return Number.isNaN(value.getTime()) ? undefined : localDate(value.toISOString(), this.timeZone);
   }
 
   private renderQuickDialog() {
