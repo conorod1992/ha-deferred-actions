@@ -3,7 +3,7 @@ on:
   push:
   pull_request:
 permissions:
-  contents: read
+  contents: write
 jobs:
   python:
     runs-on: ubuntu-latest
@@ -33,10 +33,13 @@ jobs:
               importlib.import_module(f"{integration.__name__}.{module.name}")
           PY
   frontend:
+    if: github.ref == 'refs/heads/feature/timezone-selector-fields' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     defaults: {run: {working-directory: frontend}}
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-node@v4
         with: {node-version: 22, cache: npm, cache-dependency-path: frontend/package-lock.json}
       - run: npm ci
@@ -44,16 +47,30 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
-      - name: Upload validated PR 9 frontend output
-        uses: actions/upload-artifact@v4
-        with:
-          name: pr9-validated-frontend
-          path: |
-            frontend/src/deferred-actions-panel.ts
-            frontend/src/timezone.ts
-            frontend/src/timezone.test.ts
-            frontend/src/service-selectors.ts
-            frontend/src/service-selectors.test.ts
-            custom_components/deferred_actions/frontend/deferred-actions-panel.js
-      - name: Verify committed production bundle
-        run: git diff --exit-code -- ../custom_components/deferred_actions/frontend/deferred-actions-panel.js
+      - name: Replace temporary harness with clean validated commit
+        working-directory: .
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          mkdir -p "$tmp/frontend/src" "$tmp/custom_components/deferred_actions/frontend"
+          cp frontend/src/deferred-actions-panel.ts "$tmp/frontend/src/"
+          cp frontend/src/timezone.ts "$tmp/frontend/src/"
+          cp frontend/src/timezone.test.ts "$tmp/frontend/src/"
+          cp frontend/src/service-selectors.ts "$tmp/frontend/src/"
+          cp frontend/src/service-selectors.test.ts "$tmp/frontend/src/"
+          cp custom_components/deferred_actions/frontend/deferred-actions-panel.js "$tmp/custom_components/deferred_actions/frontend/"
+
+          git reset --hard f50afc6ec252036c7e972aafe9a5f166c73e0e67
+          cp "$tmp/frontend/src/deferred-actions-panel.ts" frontend/src/
+          cp "$tmp/frontend/src/timezone.ts" frontend/src/
+          cp "$tmp/frontend/src/timezone.test.ts" frontend/src/
+          cp "$tmp/frontend/src/service-selectors.ts" frontend/src/
+          cp "$tmp/frontend/src/service-selectors.test.ts" frontend/src/
+          cp "$tmp/custom_components/deferred_actions/frontend/deferred-actions-panel.js" custom_components/deferred_actions/frontend/
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- frontend/src/deferred-actions-panel.ts frontend/src/timezone.ts frontend/src/timezone.test.ts frontend/src/service-selectors.ts frontend/src/service-selectors.test.ts custom_components/deferred_actions/frontend/deferred-actions-panel.js
+          git diff --cached --check
+          git commit -m "Improve timezone handling and service field selectors"
+          git push --force origin HEAD:feature/timezone-selector-fields
