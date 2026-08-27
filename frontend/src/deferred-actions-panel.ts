@@ -3,10 +3,12 @@ import { customElement, property, state } from "lit/decorators.js";
 import { dump, load } from "js-yaml";
 import { createJob, listJobs, operateJob, runFor, subscribeJobs, updateJob } from "./api";
 import {
-  conditionsToVisual, dataEntryWithType, newVisualAction, presentError, sequenceToVisual, UserFacingError, visualToConditions, visualToSequence,
+  conditionsToVisual, dataEntry, dataEntryWithType, newVisualAction, presentError, sequenceToVisual, UserFacingError, visualToConditions, visualToSequence,
   type DataEntry, type DataValueType, type VisualAction, type VisualCondition, type VisualConditions, type VisualServiceAction, type VisualTarget,
 } from "./editor-model";
 import { buildJobPreview, effectiveOverdueLabel, groupActiveJobs, historyOutcome, isHistoryStatus, localDate, matchesJobSearch, relativeTime, resolutionHints, snoozePresets } from "./format";
+import { defaultValueForSelector, selectorFieldForAction, selectorFieldsForAction, selectorValueForEntry } from "./service-selectors";
+import { isoToLocalInput, localInputToIso } from "./timezone";
 import type { DeferredJob, HomeAssistant, PushEvent, QueueSummary } from "./types";
 
 type Tab = "Pending" | "Paused" | "Failed" | "History" | "All";
@@ -157,7 +159,7 @@ export class DeferredActionsPanel extends LitElement {
     this.conditionFailure = job?.condition_failure ?? "skip";
     this.overduePolicy = job?.overdue_policy ?? "";
     this.overdueGraceMinutes = job?.overdue_grace ? String(job.effective_overdue_grace_minutes) : "";
-    this.validUntil = job?.valid_until_local?.slice(0, 16) ?? "";
+    this.validUntil = job?.valid_until ? isoToLocalInput(job.valid_until, this.timeZone) : "";
     this.scheduleMode = "delay";
     this.creationKind = "later";
     this.jobKey = job?.job_key ?? "";
@@ -311,7 +313,21 @@ export class DeferredActionsPanel extends LitElement {
 
   private renderActionData(action: VisualServiceAction, update: (action: VisualServiceAction) => void): ReturnType<typeof html> {
     const updateData = (index: number, patch: Partial<DataEntry>) => update({ ...action, data: action.data.map((entry, itemIndex) => itemIndex === index ? { ...entry, ...patch } : entry) });
-    return html`<div class="section-head"><strong>Action data</strong><button type="button" class="link" @click=${() => update({ ...action, data: [...action.data, { key: "", type: "text", value: "", raw: "" }] })}>Add field</button></div>${action.data.map((entry, index) => html`<div class="data-row"><input aria-label="Data field" placeholder="brightness_pct" .value=${entry.key} @input=${(event: InputEvent) => updateData(index, { key: (event.currentTarget as HTMLInputElement).value })}><select aria-label="Data value type" .value=${entry.type} @change=${(event: Event) => updateData(index, dataEntryWithType(entry, (event.currentTarget as HTMLSelectElement).value as DataValueType))}><option value="text">Text</option><option value="number">Number</option><option value="boolean">Boolean</option><option value="null">Null</option></select>${this.renderDataValue(entry, (patch) => updateData(index, patch))}<button type="button" class="icon" title="Remove data field" @click=${() => update({ ...action, data: action.data.filter((_, itemIndex) => itemIndex !== index) })}><ha-icon icon="mdi:close"></ha-icon></button></div>`)}`;
+    const selectorFields = selectorFieldsForAction(this.hass, action.action);
+    const availableSelectorFields = selectorFields.filter((field) => !action.data.some((entry) => entry.key === field.key));
+    const addSelectorField = (event: Event): void => {
+      const select = event.currentTarget as HTMLSelectElement;
+      const field = selectorFields.find((item) => item.key === select.value);
+      if (!field) return;
+      update({ ...action, data: [...action.data, dataEntry(field.key, defaultValueForSelector(field.selector, field.default))] });
+      select.value = "";
+    };
+    return html`<div class="section-head"><strong>Action data</strong><button type="button" class="link" @click=${() => update({ ...action, data: [...action.data, { key: "", type: "text", value: "", raw: "" }] })}>Add custom field</button></div>
+      ${availableSelectorFields.length ? html`<label>Add Home Assistant field<select aria-label="Add Home Assistant field" @change=${addSelectorField}><option value="">Choose a field…</option>${availableSelectorFields.map((field) => html`<option value=${field.key}>${field.name ?? field.key}${field.required ? " (required)" : ""}</option>`)}</select><small>Fields advertised by Home Assistant use their native selector. Custom or unsupported values still use the typed fallback below.</small></label>` : nothing}
+      ${action.data.map((entry, index) => {
+        const field = selectorFieldForAction(this.hass, action.action, entry.key);
+        return html`<div class="data-row"><input aria-label="Data field" placeholder="brightness_pct" .value=${entry.key} @input=${(event: InputEvent) => updateData(index, { key: (event.currentTarget as HTMLInputElement).value })}>${field ? html`<span class="null-value">Home Assistant</span>` : html`<select aria-label="Data value type" .value=${entry.type} @change=${(event: Event) => updateData(index, dataEntryWithType(entry, (event.currentTarget as HTMLSelectElement).value as DataValueType))}><option value="text">Text</option><option value="number">Number</option><option value="boolean">Boolean</option><option value="null">Null</option></select>`}${field ? html`<div><ha-selector .hass=${this.hass} .selector=${field.selector} .value=${selectorValueForEntry(entry)} .label=${field.name ?? entry.key} @value-changed=${(event: CustomEvent<{ value: unknown }>) => { const value = event.detail.value; if (value === null || ["string", "number", "boolean"].includes(typeof value)) update({ ...action, data: action.data.map((item, itemIndex) => itemIndex === index ? dataEntry(entry.key, value as string | number | boolean | null) : item) }); else this.setError(new UserFacingError("This Home Assistant field returned a structured value. Use a custom field or YAML for this action.")); }}></ha-selector>${field.description ? html`<small>${field.description}</small>` : nothing}</div>` : this.renderDataValue(entry, (patch) => updateData(index, patch))}<button type="button" class="icon" title="Remove data field" @click=${() => update({ ...action, data: action.data.filter((_, itemIndex) => itemIndex !== index) })}><ha-icon icon="mdi:close"></ha-icon></button></div>`;
+      })}`;
   }
 
   private renderDataValue(entry: DataEntry, update: (patch: Partial<DataEntry>) => void) {
@@ -399,7 +415,7 @@ export class DeferredActionsPanel extends LitElement {
         condition_failure: String(form.get("condition_failure") ?? "skip"),
         overdue_policy: String(form.get("overdue_policy") ?? "") || null,
         overdue_grace: String(form.get("overdue_grace_minutes") ?? "") ? { minutes: Number(form.get("overdue_grace_minutes")) } : null,
-        valid_until: String(form.get("valid_until") ?? "") ? new Date(String(form.get("valid_until"))).toISOString() : null,
+        valid_until: this.validUntil ? this.localWallTimeToIso(this.validUntil) : null,
       };
       if (!Array.isArray(common.conditions)) throw new UserFacingError("Conditions YAML must be a list");
       this.busy = true;
@@ -409,9 +425,7 @@ export class DeferredActionsPanel extends LitElement {
         if (this.scheduleMode === "absolute") {
           const date = String(form.get("date"));
           const time = String(form.get("time"));
-          const local = new Date(`${date}T${time}`);
-          if (Number.isNaN(local.getTime())) throw new UserFacingError("Choose a valid date and time");
-          schedule = { execute_at: local.toISOString() };
+          schedule = { execute_at: this.localWallTimeToIso(`${date}T${time}`) };
         } else {
           const value = Number(form.get("delay_value"));
           const unit = String(form.get("delay_unit"));
@@ -512,9 +526,14 @@ export class DeferredActionsPanel extends LitElement {
     return this.overdueGraceMinutes ? `Run only if less than ${this.overdueGraceMinutes} minutes late` : "Run only within the configured grace period";
   }
 
+  private localWallTimeToIso(value: string): string {
+    try { return localInputToIso(value, this.timeZone); }
+    catch { throw new UserFacingError(`Choose a valid date and time in the Home Assistant timezone (${this.timeZone}).`); }
+  }
+
   private previewValidUntil(): string | undefined {
-    const value = new Date(this.validUntil);
-    return Number.isNaN(value.getTime()) ? undefined : localDate(value.toISOString(), this.timeZone);
+    try { return localDate(localInputToIso(this.validUntil, this.timeZone), this.timeZone); }
+    catch { return undefined; }
   }
 
   private renderQuickDialog() {
@@ -532,9 +551,10 @@ export class DeferredActionsPanel extends LitElement {
     if (!dialog) return;
     const form = new FormData(event.currentTarget as HTMLFormElement);
     if (dialog.kind === "reschedule") {
-      const local = new Date(`${String(form.get("date"))}T${String(form.get("time"))}`);
-      if (Number.isNaN(local.getTime())) { this.error = "Choose a valid date and time"; return; }
-      await this.operate("reschedule", dialog.job, { execute_at: local.toISOString() });
+      try {
+        const executeAt = this.localWallTimeToIso(`${String(form.get("date"))}T${String(form.get("time"))}`);
+        await this.operate("reschedule", dialog.job, { execute_at: executeAt });
+      } catch (error) { this.setError(error); return; }
     } else {
       const minutes = Number(form.get("minutes"));
       if (!Number.isFinite(minutes) || (["duplicate", "snooze"].includes(dialog.kind) ? minutes <= 0 : minutes === 0)) { this.error = "Enter a valid number of minutes"; return; }
