@@ -47,7 +47,7 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
-      - name: Replace temporary harness with clean validated commit
+      - name: Publish clean validated branch
         working-directory: .
         run: |
           set -euo pipefail
@@ -73,4 +73,4 @@ jobs:
           git add -- frontend/src/deferred-actions-panel.ts frontend/src/timezone.ts frontend/src/timezone.test.ts frontend/src/service-selectors.ts frontend/src/service-selectors.test.ts custom_components/deferred_actions/frontend/deferred-actions-panel.js
           git diff --cached --check
           git commit -m "Improve timezone handling and service field selectors"
-          git push --force origin HEAD:feature/timezone-selector-fields
+          git push origin HEAD:feature/timezone-selector-fields-pr9
