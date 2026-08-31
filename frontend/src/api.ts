@@ -3,7 +3,7 @@ import type { DeferredJob, HomeAssistant, ListResponse, PushEvent } from "./type
 const command = <T>(hass: HomeAssistant, operation: string, data: Record<string, unknown> = {}): Promise<T> =>
   hass.callWS<T>({ type: `deferred_actions/${operation}`, data });
 
-export const listJobs = (hass: HomeAssistant): Promise<ListResponse> => command(hass, "list", { limit: 1000 });
+export const listJobs = (hass: HomeAssistant): Promise<ListResponse> => command(hass, "list", { limit: null });
 export const createJob = (hass: HomeAssistant, data: Record<string, unknown>): Promise<{ job: DeferredJob }> => command(hass, "create", data);
 export const runFor = (hass: HomeAssistant, data: Record<string, unknown>): Promise<unknown> =>
   hass.callService("deferred_actions", "run_for", data, undefined, true, true);

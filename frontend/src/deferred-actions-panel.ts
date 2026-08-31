@@ -59,35 +59,75 @@ export class DeferredActionsPanel extends LitElement {
   @state() private tagFilter = "";
   private unsubscribe?: () => void;
   private clock?: number;
+  private connectionGeneration = 0;
+  private refreshing = false;
+  private bufferedPush: PushEvent[] = [];
 
   connectedCallback(): void {
     super.connectedCallback();
+    const generation = ++this.connectionGeneration;
     this.clock = window.setInterval(() => this.requestUpdate(), 1000);
+    if (this.hasUpdated) void this.initialize(generation);
   }
 
   disconnectedCallback(): void {
+    this.connectionGeneration += 1;
     this.unsubscribe?.();
+    this.unsubscribe = undefined;
     if (this.clock) window.clearInterval(this.clock);
+    this.clock = undefined;
     super.disconnectedCallback();
   }
 
-  protected firstUpdated(): void { void this.initialize(); }
+  protected firstUpdated(): void { void this.initialize(this.connectionGeneration); }
 
-  private async initialize(): Promise<void> {
-    await this.refresh();
-    this.unsubscribe = await subscribeJobs(this.hass, (event) => this.handlePush(event));
+  private async initialize(generation: number): Promise<void> {
+    if (!this.isConnected || this.unsubscribe) return;
+    try {
+      const unsubscribe = await subscribeJobs(this.hass, (event) => this.handlePush(event));
+      if (!this.isConnected || generation !== this.connectionGeneration) {
+        unsubscribe();
+        return;
+      }
+      this.unsubscribe = unsubscribe;
+    } catch (error) {
+      if (this.isConnected && generation === this.connectionGeneration) this.setError(error);
+    }
+    if (this.isConnected && generation === this.connectionGeneration) await this.refresh();
   }
 
   private async refresh(): Promise<void> {
+    if (this.refreshing) return;
+    this.refreshing = true;
     try {
       const result = await listJobs(this.hass);
       this.jobs = result.jobs;
       this.recalculate();
     } catch (error) { this.setError(error); }
+    finally {
+      this.refreshing = false;
+      const buffered = this.bufferedPush.splice(0);
+      buffered.forEach((event) => this.applyPush(event));
+    }
   }
 
   private handlePush(event: PushEvent): void {
-    if (event.event === "queue_summary" && event.summary) this.summary = event.summary;
+    if (this.refreshing) {
+      this.bufferedPush.push(event);
+      return;
+    }
+    this.applyPush(event);
+  }
+
+  private applyPush(event: PushEvent): void {
+    if (event.event === "history_cleaned") {
+      void this.refresh();
+      return;
+    }
+    if (event.event === "queue_summary" && event.summary) {
+      this.summary = event.summary;
+      return;
+    }
     if (event.event === "job_deleted" && event.job_id) this.jobs = this.jobs.filter((job) => job.id !== event.job_id);
     else if (event.job) {
       const index = this.jobs.findIndex((job) => job.id === event.job?.id);

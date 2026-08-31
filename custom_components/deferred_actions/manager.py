@@ -867,7 +867,7 @@ class DeferredActionsManager:
         source: str | None = None,
         target_entity: str | None = None,
         include_history: bool = True,
-        limit: int = 100,
+        limit: int | None = 100,
         descending: bool = False,
     ) -> dict[str, Any]:
         jobs = list(self.jobs.values())
@@ -904,10 +904,11 @@ class DeferredActionsManager:
             reverse=descending,
         )
         total = len(jobs)
+        selected = jobs if limit is None else jobs[:limit]
         return {
             "count": total,
-            "jobs": [self._public(j) for j in jobs[:limit]],
-            "more": total > limit,
+            "jobs": [self._public(j) for j in selected],
+            "more": False if limit is None else total > limit,
         }
 
     async def async_update(
@@ -1319,6 +1320,8 @@ class DeferredActionsManager:
                 del self.jobs[job_id]
             if snapshots:
                 await self._durable_save_with_rollback_locked(snapshots)
+        if remove:
+            self._notify("history_cleaned", count=len(remove))
         return {"deleted_count": len(remove)}
 
     def summary(self) -> dict[str, Any]:
