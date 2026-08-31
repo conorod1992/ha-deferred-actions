@@ -194,9 +194,7 @@ class DeferredActionsManager:
             await self._storage.async_delay_save(self.jobs)
         self._async_reschedule_locked()
 
-    async def _durable_save_with_rollback_locked(
-        self, snapshots: dict[str, DeferredJob]
-    ) -> None:
+    async def _durable_save_with_rollback_locked(self, snapshots: dict[str, DeferredJob]) -> None:
         """Persist queue state, restoring existing records if persistence fails."""
         try:
             await self._storage.async_save(self.jobs)
