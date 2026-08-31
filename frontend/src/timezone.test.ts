@@ -12,6 +12,14 @@ describe("Home Assistant timezone wall-clock conversion", () => {
   });
 
   it("rejects nonexistent DST wall-clock times", () => {
-    expect(() => localInputToIso("2026-03-29T01:30", "Europe/Dublin")).toThrow();
+    expect(() => localInputToIso("2026-03-29T01:30", "Europe/Dublin")).toThrow("does not exist");
+  });
+
+  it("rejects ambiguous DST fall-back wall-clock times instead of silently choosing one", () => {
+    expect(() => localInputToIso("2026-10-25T01:30", "Europe/Dublin")).toThrow("occurs twice");
+  });
+
+  it("handles non-hour DST transitions without guessing", () => {
+    expect(() => localInputToIso("2026-04-05T01:45", "Australia/Lord_Howe")).toThrow("occurs twice");
   });
 });

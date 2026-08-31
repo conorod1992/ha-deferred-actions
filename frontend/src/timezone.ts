@@ -36,6 +36,20 @@ const parseLocalInput = (value: string): WallClockParts => {
 const sameParts = (left: WallClockParts, right: WallClockParts): boolean => left.year === right.year && left.month === right.month && left.day === right.day && left.hour === right.hour && left.minute === right.minute && left.second === right.second;
 const asUtcMs = (parts: WallClockParts): number => Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
 const pad = (value: number): string => String(value).padStart(2, "0");
+const HOUR_MS = 60 * 60 * 1000;
+
+const possibleInstants = (target: WallClockParts, timeZone: string): number[] => {
+  const targetAsUtc = asUtcMs(target);
+  const offsets = new Set<number>();
+  for (let hours = -48; hours <= 48; hours += 6) {
+    const probe = targetAsUtc + (hours * HOUR_MS);
+    offsets.add(asUtcMs(wallClockParts(new Date(probe), timeZone)) - probe);
+  }
+  return [...new Set([...offsets]
+    .map((offset) => targetAsUtc - offset)
+    .filter((candidate) => sameParts(wallClockParts(new Date(candidate), timeZone), target)))]
+    .sort((left, right) => left - right);
+};
 
 export const isoToLocalInput = (iso: string, timeZone: string): string => {
   const date = new Date(iso);
@@ -45,16 +59,8 @@ export const isoToLocalInput = (iso: string, timeZone: string): string => {
 };
 
 export const localInputToIso = (value: string, timeZone: string): string => {
-  const target = parseLocalInput(value);
-  const targetAsUtc = asUtcMs(target);
-  let candidate = targetAsUtc;
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    const displayed = wallClockParts(new Date(candidate), timeZone);
-    const delta = targetAsUtc - asUtcMs(displayed);
-    if (delta === 0) break;
-    candidate += delta;
-  }
-  const result = new Date(candidate);
-  if (!sameParts(wallClockParts(result, timeZone), target)) throw new RangeError("This wall-clock time does not exist in the selected timezone");
-  return result.toISOString();
+  const candidates = possibleInstants(parseLocalInput(value), timeZone);
+  if (!candidates.length) throw new RangeError("This wall-clock time does not exist in the selected timezone");
+  if (candidates.length > 1) throw new RangeError("This wall-clock time occurs twice because the clocks change; use an explicit-offset API timestamp to choose the intended occurrence");
+  return new Date(candidates[0]!).toISOString();
 };
