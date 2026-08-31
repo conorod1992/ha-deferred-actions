@@ -194,6 +194,18 @@ class DeferredActionsManager:
             await self._storage.async_delay_save(self.jobs)
         self._async_reschedule_locked()
 
+    async def _durable_save_with_rollback_locked(
+        self, snapshots: dict[str, DeferredJob]
+    ) -> None:
+        """Persist queue state, restoring existing records if persistence fails."""
+        try:
+            await self._storage.async_save(self.jobs)
+        except BaseException:
+            self.jobs.update(snapshots)
+            self._async_reschedule_locked()
+            raise
+        self._async_reschedule_locked()
+
     @callback
     def _async_reschedule_locked(self) -> None:
         if self._cancel_next:
@@ -217,24 +229,35 @@ class DeferredActionsManager:
             self._cancel_next()
         self._cancel_next = None
         due: list[DeferredJob] = []
+        expired: list[DeferredJob] = []
         async with self._lock:
             if self._unloaded:
                 return
+            snapshots: dict[str, DeferredJob] = {}
             for job in self.jobs.values():
                 if (
                     job.status in {JobStatus.PENDING, JobStatus.PAUSED}
                     and job.valid_until
                     and job.valid_until <= now
                 ):
-                    self._expire_locked(job, now)
+                    snapshots[job.id] = deepcopy(job)
+                    self._expire_locked(job, now, notify=False)
+                    expired.append(job)
                     continue
                 if job.status == JobStatus.PENDING and job.execute_at <= now:
+                    snapshots[job.id] = deepcopy(job)
                     job.status = JobStatus.EXECUTING
                     job.modified_at = utc_now()
                     job.revision += 1
                     due.append(job)
-                    self._notify("job_started", job)
-            await self._save_and_schedule_locked(durable=bool(due))
+            if snapshots:
+                await self._durable_save_with_rollback_locked(snapshots)
+            else:
+                self._async_reschedule_locked()
+            for job in expired:
+                self._notify("job_expired", job)
+            for job in due:
+                self._notify("job_started", job)
         await asyncio.gather(
             *(self._async_execute_tracked(job) for job in due), return_exceptions=True
         )
@@ -321,14 +344,15 @@ class DeferredActionsManager:
             self._notify(event, current)
             return self._public(current)
 
-    def _expire_locked(self, job: DeferredJob, now: datetime) -> None:
+    def _expire_locked(self, job: DeferredJob, now: datetime, *, notify: bool = True) -> None:
         job.status = JobStatus.EXPIRED
         job.completed_at = now
         job.modified_at = now
         job.last_error = None
         job.terminal_reason = "Validity cutoff passed before execution began"
         job.revision += 1
-        self._notify("job_expired", job)
+        if notify:
+            self._notify("job_expired", job)
 
     def _effective_overdue(self, job: DeferredJob) -> tuple[str, timedelta]:
         policy = job.overdue_policy or self.options[CONF_OVERDUE_POLICY]
@@ -964,6 +988,7 @@ class DeferredActionsManager:
                 changes["valid_until"] = self._parse_valid_until(
                     changes["valid_until"], job.execute_at
                 )
+            snapshot = deepcopy(job)
             for key, value in changes.items():
                 setattr(job, key, value)
             if "sequence" in changes or "target_entities" in changes:
@@ -975,12 +1000,13 @@ class DeferredActionsManager:
             if "conditions" in changes:
                 job.condition_entities = extract_entity_ids(job.conditions)
             if job.valid_until and job.valid_until <= utc_now():
-                self._expire_locked(job, utc_now())
-                await self._save_and_schedule_locked()
+                self._expire_locked(job, utc_now(), notify=False)
+                await self._durable_save_with_rollback_locked({job.id: snapshot})
+                self._notify("job_expired", job)
                 return self._public(job)
             job.modified_at = utc_now()
             job.revision += 1
-            await self._save_and_schedule_locked()
+            await self._durable_save_with_rollback_locked({job.id: snapshot})
             self._notify("job_updated", job)
             return self._public(job)
 
@@ -994,10 +1020,11 @@ class DeferredActionsManager:
                 raise InvalidStatusError(f"Cannot reschedule a {job.status.value} job")
             if job.valid_until and when >= job.valid_until:
                 raise InvalidTimeError("execution time must be before valid_until")
+            snapshot = deepcopy(job)
             job.execute_at = when
             job.modified_at = utc_now()
             job.revision += 1
-            await self._save_and_schedule_locked()
+            await self._durable_save_with_rollback_locked({job.id: snapshot})
             self._notify("job_updated", job)
             return self._public(job)
 
@@ -1016,10 +1043,11 @@ class DeferredActionsManager:
                 raise InvalidTimeError("resulting execution time must be in the future")
             if job.valid_until and when >= job.valid_until:
                 raise InvalidTimeError("resulting execution time must be before valid_until")
+            snapshot = deepcopy(job)
             job.execute_at = when
             job.modified_at = utc_now()
             job.revision += 1
-            await self._save_and_schedule_locked()
+            await self._durable_save_with_rollback_locked({job.id: snapshot})
             self._notify("job_updated", job)
             return self._public(job)
 
@@ -1040,10 +1068,11 @@ class DeferredActionsManager:
             when = job.execute_at + timedelta(seconds=seconds)
             if job.valid_until and when >= job.valid_until:
                 raise InvalidTimeError("snooze would reach or pass valid_until")
+            snapshot = deepcopy(job)
             job.execute_at = when
             job.modified_at = utc_now()
             job.revision += 1
-            await self._save_and_schedule_locked()
+            await self._durable_save_with_rollback_locked({job.id: snapshot})
             self._notify("job_updated", job)
             return self._public(job)
 
@@ -1056,12 +1085,13 @@ class DeferredActionsManager:
                 raise InvalidStatusError(
                     f"Cannot {event.removeprefix('job_')} a {job.status.value} job"
                 )
+            snapshot = deepcopy(job)
             job.status = target
             job.modified_at = utc_now()
             job.revision += 1
             if target in HISTORY_STATUSES:
                 job.completed_at = job.modified_at
-            await self._save_and_schedule_locked()
+            await self._durable_save_with_rollback_locked({job.id: snapshot})
             self._notify(event, job)
             return self._public(job)
 
@@ -1087,6 +1117,7 @@ class DeferredActionsManager:
             job = self.resolve(job_id=job_id)
             if job.status != JobStatus.PAUSED:
                 raise InvalidStatusError(f"Cannot resume a {job.status.value} job")
+            snapshot = deepcopy(job)
             now = utc_now()
             if replacement:
                 if job.valid_until and replacement >= job.valid_until:
@@ -1094,8 +1125,9 @@ class DeferredActionsManager:
                 job.execute_at = replacement
             elif job.execute_at <= now:
                 if job.valid_until and job.valid_until <= now:
-                    self._expire_locked(job, now)
-                    await self._save_and_schedule_locked()
+                    self._expire_locked(job, now, notify=False)
+                    await self._durable_save_with_rollback_locked({job.id: snapshot})
+                    self._notify("job_expired", job)
                     return self._public(job)
                 policy, grace = self._effective_overdue(job)
                 if policy != OVERDUE_EXECUTE and not (
@@ -1107,13 +1139,13 @@ class DeferredActionsManager:
                     job.last_error = None
                     job.terminal_reason = "Execution time passed while the job was paused"
                     job.revision += 1
-                    await self._save_and_schedule_locked()
+                    await self._durable_save_with_rollback_locked({job.id: snapshot})
                     self._notify("job_missed", job)
                     return self._public(job)
             job.status = JobStatus.PENDING
             job.modified_at = now
             job.revision += 1
-            await self._save_and_schedule_locked()
+            await self._durable_save_with_rollback_locked({job.id: snapshot})
             self._notify("job_resumed", job)
             return self._public(job)
 
@@ -1127,10 +1159,12 @@ class DeferredActionsManager:
                 JobStatus.MISSED,
             }:
                 raise InvalidStatusError(f"Cannot execute a {job.status.value} job")
+            snapshot = deepcopy(job)
             now = utc_now()
             if job.valid_until and job.valid_until <= now:
-                self._expire_locked(job, now)
-                await self._save_and_schedule_locked()
+                self._expire_locked(job, now, notify=False)
+                await self._durable_save_with_rollback_locked({job.id: snapshot})
+                self._notify("job_expired", job)
                 return self._public(job)
             job.status = JobStatus.EXECUTING
             job.completed_at = None
@@ -1138,7 +1172,7 @@ class DeferredActionsManager:
             job.terminal_reason = None
             job.modified_at = now
             job.revision += 1
-            await self._save_and_schedule_locked(durable=True)
+            await self._durable_save_with_rollback_locked({job.id: snapshot})
             self._notify("job_started", job)
         return await self._async_execute_tracked(job)
 
@@ -1148,8 +1182,9 @@ class DeferredActionsManager:
             if job.status == JobStatus.EXECUTING:
                 raise InvalidStatusError("An executing job cannot be deleted")
             data = self._public(job)
+            snapshot = deepcopy(job)
             del self.jobs[job.id]
-            await self._save_and_schedule_locked()
+            await self._durable_save_with_rollback_locked({job.id: snapshot})
             self._notify("job_deleted", job, job_id=job.id)
             return {"deleted": data}
 
@@ -1197,14 +1232,39 @@ class DeferredActionsManager:
             raise BulkConfirmationError("confirm_bulk must be true")
         if not any((statuses, tag, job_key)):
             raise BulkConfirmationError("A selector is required for bulk cancellation")
-        candidates = self.async_list(statuses=statuses, tag=tag, job_key=job_key, limit=10000)[
-            "jobs"
-        ]
-        cancelled = []
-        for item in candidates:
-            if item["status"] in {"pending", "paused"}:
-                cancelled.append(await self.async_cancel(item["id"]))
-        return {"count": len(cancelled), "jobs": cancelled}
+        wanted = {JobStatus(value) for value in statuses} if statuses else None
+        async with self._lock:
+            candidates = [
+                job
+                for job in self.jobs.values()
+                if job.status in {JobStatus.PENDING, JobStatus.PAUSED}
+                and (wanted is None or job.status in wanted)
+                and (tag is None or tag in job.tags)
+                and (job_key is None or job.job_key == job_key)
+            ]
+            candidates.sort(
+                key=lambda job: (
+                    job.status != JobStatus.PENDING,
+                    job.execute_at,
+                    job.created_at,
+                )
+            )
+            if not candidates:
+                return {"count": 0, "jobs": []}
+            snapshots = {job.id: deepcopy(job) for job in candidates}
+            now = utc_now()
+            for job in candidates:
+                job.status = JobStatus.CANCELLED
+                job.completed_at = now
+                job.modified_at = now
+                job.revision += 1
+            await self._durable_save_with_rollback_locked(snapshots)
+            for job in candidates:
+                self._notify("job_cancelled", job)
+            return {
+                "count": len(candidates),
+                "jobs": [self._public(job) for job in candidates],
+            }
 
     async def async_delete_history(
         self, *, confirm_bulk: bool, statuses: list[str] | None = None, before: str | None = None
@@ -1212,20 +1272,29 @@ class DeferredActionsManager:
         if not confirm_bulk or not any((statuses, before)):
             raise BulkConfirmationError("confirm_bulk and a selector are required")
         before_dt = ensure_utc(datetime.fromisoformat(before)) if before else None
-        wanted = {JobStatus(value) for value in statuses} if statuses else HISTORY_STATUSES
+        history_statuses = {JobStatus(value) for value in HISTORY_STATUSES}
+        wanted = {JobStatus(value) for value in statuses} if statuses else history_statuses
+        invalid_statuses = wanted - history_statuses
+        if invalid_statuses:
+            invalid = ", ".join(sorted(status.value for status in invalid_statuses))
+            raise InvalidStatusError(
+                f"delete_history only accepts history statuses; invalid: {invalid}"
+            )
         async with self._lock:
-            ids = [
-                j.id
-                for j in self.jobs.values()
-                if j.status in wanted
-                and (before_dt is None or (j.completed_at and j.completed_at < before_dt))
+            selected = [
+                job
+                for job in self.jobs.values()
+                if job.status in wanted
+                and (before_dt is None or (job.completed_at and job.completed_at < before_dt))
             ]
-            for job_id in ids:
-                del self.jobs[job_id]
-            await self._save_and_schedule_locked()
-        if ids:
-            self._notify("history_cleaned", count=len(ids))
-        return {"deleted_count": len(ids)}
+            snapshots = {job.id: deepcopy(job) for job in selected}
+            for job in selected:
+                del self.jobs[job.id]
+            if snapshots:
+                await self._durable_save_with_rollback_locked(snapshots)
+        if selected:
+            self._notify("history_cleaned", count=len(selected))
+        return {"deleted_count": len(selected)}
 
     async def async_cleanup_history(self) -> dict[str, Any]:
         if not self.options[CONF_HISTORY_ENABLED]:
@@ -1244,10 +1313,11 @@ class DeferredActionsManager:
             )
             remove = {j.id for j in history if (j.completed_at or j.modified_at) < cutoff}
             remove.update(j.id for j in history[maximum:])
+            snapshots = {job_id: deepcopy(self.jobs[job_id]) for job_id in remove}
             for job_id in remove:
                 del self.jobs[job_id]
-            if remove:
-                await self._storage.async_save(self.jobs)
+            if snapshots:
+                await self._durable_save_with_rollback_locked(snapshots)
         return {"deleted_count": len(remove)}
 
     def summary(self) -> dict[str, Any]:
