@@ -213,6 +213,7 @@ async def async_run_for(
         await manager.async_run_owned(
             lambda: script.async_run(context=context), "Deferred Actions run-for start"
         )
+        prepared.job.execute_at = manager._calculate_time(None, duration)
         return await manager.async_commit_create(prepared)
     except BaseException:
         await manager.async_abort_create(prepared)
