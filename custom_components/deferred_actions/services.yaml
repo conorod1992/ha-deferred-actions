@@ -43,11 +43,16 @@ run_for:
   target: {entity: {}}
   fields:
     name: {required: true, selector: {text: {}}}
+    description: {selector: {text: {multiline: true}}}
     duration: {required: true, selector: {duration: {enable_day: true}}}
     start_action: {selector: {text: {}}}
     end_action: {selector: {text: {}}}
     start_sequence: {selector: {object: {}}}
     end_sequence: {selector: {object: {}}}
+    job_key: {selector: {text: {}}}
+    tags: {selector: {text: {multiple: true}}}
+    conflict_mode:
+      selector: {select: {options: [keep_all, replace_same_key, cancel_same_key, reject_same_key]}}
 get:
   name: Get
   description: Resolve and return exactly one deferred action.

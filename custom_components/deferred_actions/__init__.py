@@ -74,7 +74,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: DeferredActionsConfigEnt
             if not hass.data.get(static_marker):
                 frontend_dir = Path(__file__).parent / "frontend"
                 await hass.http.async_register_static_paths(
-                    [StaticPathConfig("/deferred_actions_frontend", str(frontend_dir), True)]
+                    [StaticPathConfig("/deferred_actions_frontend", str(frontend_dir), False)]
                 )
                 hass.data[static_marker] = True
             frontend.async_register_built_in_panel(

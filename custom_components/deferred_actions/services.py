@@ -34,20 +34,25 @@ SERVICE_NAMES = (
 )
 
 _NONNEGATIVE_NUMBER = vol.All(vol.Coerce(float), vol.Range(min=0))
-_DURATION_SCHEMA = vol.Schema(
-    {
-        vol.Optional("days"): _NONNEGATIVE_NUMBER,
-        vol.Optional("hours"): _NONNEGATIVE_NUMBER,
-        vol.Optional("minutes"): _NONNEGATIVE_NUMBER,
-        vol.Optional("seconds"): _NONNEGATIVE_NUMBER,
-        vol.Optional("milliseconds"): _NONNEGATIVE_NUMBER,
-    },
-    extra=vol.PREVENT_EXTRA,
-)
+_SIGNED_NUMBER = vol.Coerce(float)
+_DURATION_FIELDS = ("days", "hours", "minutes", "seconds", "milliseconds")
+
+
+def _duration_schema(number_validator):
+    return vol.Schema(
+        {vol.Optional(key): number_validator for key in _DURATION_FIELDS},
+        extra=vol.PREVENT_EXTRA,
+    )
+
+
+_DURATION_SCHEMA = _duration_schema(_NONNEGATIVE_NUMBER)
+_SIGNED_DURATION_SCHEMA = _duration_schema(_SIGNED_NUMBER)
 _TIMESTAMP = vol.Any(str, datetime)
 _NULLABLE_TIMESTAMP = vol.Any(None, str, datetime)
 _OVERDUE_POLICY = vol.In(("execute", "skip", "execute_within_grace"))
+_CONFLICT_MODE = vol.In(("keep_all", "replace_same_key", "cancel_same_key", "reject_same_key"))
 _NONEMPTY_STRING = vol.All(str, lambda value: value.strip(), vol.Length(min=1))
+_JOB_ID_ONLY = vol.Schema({vol.Required("job_id"): str}, extra=vol.PREVENT_EXTRA)
 
 _CREATE_FIELDS = {
     vol.Required("name"): _NONEMPTY_STRING,
@@ -64,31 +69,87 @@ _CREATE_FIELDS = {
     vol.Optional("tags"): [str],
     vol.Optional("source"): str,
     vol.Optional("target_entities"): [str],
-    vol.Optional("conflict_mode"): vol.In(
-        ("keep_all", "replace_same_key", "cancel_same_key", "reject_same_key")
-    ),
+    vol.Optional("conflict_mode"): _CONFLICT_MODE,
 }
 
 SERVICE_SCHEMAS = {
     "create": vol.Schema(_CREATE_FIELDS, extra=vol.PREVENT_EXTRA),
     "create_safe": vol.Schema(
         {
-            vol.Required("name"): str,
+            vol.Required("name"): _NONEMPTY_STRING,
             vol.Exclusive("action", "safe_action"): str,
             vol.Exclusive("service", "safe_action"): str,
             vol.Required("target_entities"): vol.Any(str, [str]),
             vol.Optional("data"): dict,
             vol.Optional("execute_at"): _TIMESTAMP,
             vol.Optional("delay"): _DURATION_SCHEMA,
-            vol.Optional("description"): str,
-            vol.Optional("job_key"): str,
+            vol.Optional("description"): vol.Any(None, str),
+            vol.Optional("job_key"): vol.Any(None, str),
             vol.Optional("tags"): [str],
-            vol.Optional("conflict_mode"): str,
+            vol.Optional("conflict_mode"): _CONFLICT_MODE,
             vol.Optional("conditions"): list,
             vol.Optional("condition_failure"): vol.In(("skip", "cancel", "fail")),
             vol.Optional("overdue_policy"): _OVERDUE_POLICY,
             vol.Optional("overdue_grace"): _DURATION_SCHEMA,
             vol.Optional("valid_until"): _TIMESTAMP,
+        },
+        extra=vol.PREVENT_EXTRA,
+    ),
+    "run_for": vol.Schema(
+        {
+            vol.Optional("name"): _NONEMPTY_STRING,
+            vol.Required("duration"): _DURATION_SCHEMA,
+            vol.Optional("start_action"): str,
+            vol.Optional("end_action"): str,
+            vol.Optional("start_sequence"): list,
+            vol.Optional("end_sequence"): list,
+            vol.Optional("description"): vol.Any(None, str),
+            vol.Optional("job_key"): vol.Any(None, str),
+            vol.Optional("tags"): [str],
+            vol.Optional("conflict_mode"): _CONFLICT_MODE,
+            vol.Optional("entity_id"): vol.Any(str, [str]),
+            vol.Optional("target"): dict,
+        },
+        extra=vol.PREVENT_EXTRA,
+    ),
+    "get": vol.Schema(
+        {
+            vol.Optional("job_id"): str,
+            vol.Optional("job_key"): str,
+            vol.Optional("name"): str,
+            vol.Optional("target_entity"): str,
+            vol.Optional("most_recent_pending"): bool,
+        },
+        extra=vol.PREVENT_EXTRA,
+    ),
+    "list": vol.Schema(
+        {
+            vol.Optional("statuses"): [
+                vol.In(
+                    (
+                        "pending",
+                        "paused",
+                        "executing",
+                        "completed",
+                        "cancelled",
+                        "failed",
+                        "missed",
+                        "skipped",
+                        "expired",
+                    )
+                )
+            ],
+            vol.Optional("pending_only"): bool,
+            vol.Optional("due_before"): str,
+            vol.Optional("due_after"): str,
+            vol.Optional("name_query"): str,
+            vol.Optional("job_key"): str,
+            vol.Optional("tag"): str,
+            vol.Optional("source"): str,
+            vol.Optional("target_entity"): str,
+            vol.Optional("include_history"): bool,
+            vol.Optional("limit"): vol.All(vol.Coerce(int), vol.Range(min=1, max=1000)),
+            vol.Optional("descending"): bool,
         },
         extra=vol.PREVENT_EXTRA,
     ),
@@ -106,7 +167,7 @@ SERVICE_SCHEMAS = {
             vol.Optional("overdue_policy"): vol.Any(None, _OVERDUE_POLICY),
             vol.Optional("overdue_grace"): vol.Any(None, _DURATION_SCHEMA),
             vol.Optional("valid_until"): _NULLABLE_TIMESTAMP,
-            vol.Optional("target_entities"): list,
+            vol.Optional("target_entities"): [str],
         },
         extra=vol.PREVENT_EXTRA,
     ),
@@ -118,6 +179,26 @@ SERVICE_SCHEMAS = {
         },
         extra=vol.PREVENT_EXTRA,
     ),
+    "extend": vol.Schema(
+        {vol.Required("job_id"): str, vol.Required("duration"): _SIGNED_DURATION_SCHEMA},
+        extra=vol.PREVENT_EXTRA,
+    ),
+    "snooze": vol.Schema(
+        {vol.Required("job_id"): str, vol.Required("duration"): _DURATION_SCHEMA},
+        extra=vol.PREVENT_EXTRA,
+    ),
+    "cancel": _JOB_ID_ONLY,
+    "delete": _JOB_ID_ONLY,
+    "pause": _JOB_ID_ONLY,
+    "resume": vol.Schema(
+        {
+            vol.Required("job_id"): str,
+            vol.Optional("execute_at"): _TIMESTAMP,
+            vol.Optional("delay"): _DURATION_SCHEMA,
+        },
+        extra=vol.PREVENT_EXTRA,
+    ),
+    "execute_now": _JOB_ID_ONLY,
     "duplicate": vol.Schema(
         {
             vol.Required("job_id"): str,
@@ -127,10 +208,26 @@ SERVICE_SCHEMAS = {
         },
         extra=vol.PREVENT_EXTRA,
     ),
-    "snooze": vol.Schema(
-        {vol.Required("job_id"): str, vol.Required("duration"): _DURATION_SCHEMA},
+    "cancel_all": vol.Schema(
+        {
+            vol.Required("confirm_bulk"): bool,
+            vol.Optional("statuses"): [vol.In(("pending", "paused"))],
+            vol.Optional("tag"): str,
+            vol.Optional("job_key"): str,
+        },
         extra=vol.PREVENT_EXTRA,
     ),
+    "delete_history": vol.Schema(
+        {
+            vol.Required("confirm_bulk"): bool,
+            vol.Optional("statuses"): [
+                vol.In(("completed", "cancelled", "failed", "missed", "skipped", "expired"))
+            ],
+            vol.Optional("before"): str,
+        },
+        extra=vol.PREVENT_EXTRA,
+    ),
+    "cleanup_history": vol.Schema({}, extra=vol.PREVENT_EXTRA),
 }
 
 
@@ -282,7 +379,7 @@ async def _async_handle_service(hass: HomeAssistant, call: ServiceCall):
         raise ServiceValidationError(
             str(err), translation_domain=DOMAIN, translation_key=err.code
         ) from err
-    except (KeyError, TypeError, ValueError) as err:
+    except (KeyError, OverflowError, TypeError, ValueError) as err:
         raise ServiceValidationError(str(err)) from err
     raise ServiceValidationError(f"Unknown Deferred Actions operation: {operation}")
 
@@ -295,7 +392,7 @@ async def async_register_services(hass: HomeAssistant) -> None:
                 DOMAIN,
                 name,
                 lambda call, _hass=hass: _async_handle_service(_hass, call),
-                schema=SERVICE_SCHEMAS.get(name, vol.Schema({}, extra=vol.ALLOW_EXTRA)),
+                schema=SERVICE_SCHEMAS[name],
                 supports_response=SupportsResponse.OPTIONAL,
             )
 

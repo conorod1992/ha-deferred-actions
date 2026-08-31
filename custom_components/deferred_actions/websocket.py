@@ -76,7 +76,7 @@ def _make_handler(operation: str):
             )
         except DeferredActionsError as err:
             connection.send_error(msg["id"], err.code, str(err))
-        except (KeyError, TypeError, ValueError) as err:
+        except (KeyError, OverflowError, TypeError, ValueError) as err:
             connection.send_error(msg["id"], "invalid_request", str(err))
         else:
             connection.send_result(msg["id"], result)
