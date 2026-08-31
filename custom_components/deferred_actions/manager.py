@@ -642,6 +642,9 @@ class DeferredActionsManager:
                         job.overdue_policy = candidate.overdue_policy
                         job.overdue_grace = candidate.overdue_grace
                         job.tags = candidate.tags
+                        job.source = candidate.source
+                        job.attribution = dict(candidate.attribution)
+                        job.linkage = dict(candidate.linkage)
                         job.target_entities = candidate.target_entities
                         job.explicit_target_entities = candidate.explicit_target_entities
                         job.condition_entities = candidate.condition_entities
