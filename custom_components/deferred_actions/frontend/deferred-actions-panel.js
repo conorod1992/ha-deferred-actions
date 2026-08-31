@@ -2241,20 +2241,20 @@ function Zn() {
 }
 var Qn = Zn();
 const Xn = /* @__PURE__ */ Wn(Qn), {
-  Type: Or,
-  Schema: Mr,
-  FAILSAFE_SCHEMA: Rr,
-  JSON_SCHEMA: qr,
-  CORE_SCHEMA: Ir,
-  DEFAULT_SCHEMA: Lr,
+  Type: Rr,
+  Schema: qr,
+  FAILSAFE_SCHEMA: Ir,
+  JSON_SCHEMA: Lr,
+  CORE_SCHEMA: Nr,
+  DEFAULT_SCHEMA: Fr,
   load: Ae,
-  loadAll: Nr,
+  loadAll: Dr,
   dump: re,
-  YAMLException: Fr,
-  types: Dr,
-  safeLoad: Pr,
-  safeLoadAll: Ur,
-  safeDump: Yr
+  YAMLException: Pr,
+  types: Ur,
+  safeLoad: Yr,
+  safeLoadAll: Hr,
+  safeDump: Br
 } = Xn, ut = (e, i, n = {}) => e.callWS({ type: `deferred_actions/${i}`, data: n }), er = (e) => ut(e, "list", { limit: null }), tr = (e, i) => ut(e, "create", i), ir = (e, i) => e.callService("deferred_actions", "run_for", i, void 0, !0, !0), nr = (e, i) => ut(e, "update", i), rr = (e, i, n, r = {}) => ut(e, i, { job_id: n, ...r }), or = (e, i) => e.connection.subscribeMessage(i, { type: "deferred_actions/subscribe" }), ce = (e) => !!e && typeof e == "object" && !Array.isArray(e), vn = (e) => typeof e == "string" ? [e] : Array.isArray(e) && e.every((i) => typeof i == "string") ? [...e] : void 0, Z = (e, i, n = ["alias", "description", "enabled", "continue_on_error"]) => {
   const r = /* @__PURE__ */ new Set([...i, ...n]);
   return Object.keys(e).some((l) => !r.has(l)) ? void 0 : Object.fromEntries(Object.entries(e).filter(([l]) => n.includes(l)));
@@ -2449,29 +2449,30 @@ const ae = (e, i) => new Intl.DateTimeFormat(void 0, {
   const n = { year: Number(i[1]), month: Number(i[2]), day: Number(i[3]), hour: Number(i[4]), minute: Number(i[5]), second: Number(i[6] ?? 0) }, r = new Date(Date.UTC(n.year, n.month - 1, n.day, n.hour, n.minute, n.second));
   if (r.getUTCFullYear() !== n.year || r.getUTCMonth() + 1 !== n.month || r.getUTCDate() !== n.day || r.getUTCHours() !== n.hour || r.getUTCMinutes() !== n.minute || r.getUTCSeconds() !== n.second) throw new RangeError("Invalid local date/time");
   return n;
-}, xr = (e, i) => e.year === i.year && e.month === i.month && e.day === i.day && e.hour === i.hour && e.minute === i.minute && e.second === i.second, ji = (e) => Date.UTC(e.year, e.month - 1, e.day, e.hour, e.minute, e.second), nt = (e) => String(e).padStart(2, "0"), wr = (e, i) => {
+}, xr = (e, i) => e.year === i.year && e.month === i.month && e.day === i.day && e.hour === i.hour && e.minute === i.minute && e.second === i.second, ji = (e) => Date.UTC(e.year, e.month - 1, e.day, e.hour, e.minute, e.second), nt = (e) => String(e).padStart(2, "0"), wr = 3600 * 1e3, kr = (e, i) => {
+  const n = ji(e), r = /* @__PURE__ */ new Set();
+  for (let l = -48; l <= 48; l += 6) {
+    const s = n + l * wr;
+    r.add(ji(Vt(new Date(s), i)) - s);
+  }
+  return [...new Set([...r].map((l) => n - l).filter((l) => xr(Vt(new Date(l), i), e)))].sort((l, s) => l - s);
+}, Sr = (e, i) => {
   const n = new Date(e);
   if (Number.isNaN(n.getTime())) throw new RangeError("Invalid timestamp");
   const r = Vt(n, i);
   return `${r.year}-${nt(r.month)}-${nt(r.day)}T${nt(r.hour)}:${nt(r.minute)}`;
 }, Wi = (e, i) => {
-  const n = Ar(e), r = ji(n);
-  let l = r;
-  for (let a = 0; a < 6; a += 1) {
-    const c = Vt(new Date(l), i), h = r - ji(c);
-    if (h === 0) break;
-    l += h;
-  }
-  const s = new Date(l);
-  if (!xr(Vt(s, i), n)) throw new RangeError("This wall-clock time does not exist in the selected timezone");
-  return s.toISOString();
+  const n = kr(Ar(e), i);
+  if (!n.length) throw new RangeError("This wall-clock time does not exist in the selected timezone");
+  if (n.length > 1) throw new RangeError("This wall-clock time occurs twice because the clocks change; use an explicit-offset API timestamp to choose the intended occurrence");
+  return new Date(n[0]).toISOString();
 };
-var kr = Object.defineProperty, Sr = Object.getOwnPropertyDescriptor, N = (e, i, n, r) => {
-  for (var l = r > 1 ? void 0 : r ? Sr(i, n) : i, s = e.length - 1, a; s >= 0; s--)
+var Cr = Object.defineProperty, Tr = Object.getOwnPropertyDescriptor, N = (e, i, n, r) => {
+  for (var l = r > 1 ? void 0 : r ? Tr(i, n) : i, s = e.length - 1, a; s >= 0; s--)
     (a = e[s]) && (l = (r ? a(i, n, l) : a(l)) || l);
-  return r && l && kr(i, n, l), l;
+  return r && l && Cr(i, n, l), l;
 };
-const Cr = {
+const Er = {
   "light.turn_on": "light.turn_off",
   "switch.turn_on": "switch.turn_off",
   "fan.turn_on": "fan.turn_off",
@@ -2585,7 +2586,7 @@ let L = class extends Le {
     const i = e?.sequence ?? [{ action: "light.turn_off", target: {} }], n = ue(i);
     this.visualActions = n, this.actionYaml = re(i, { noRefs: !0 });
     const r = Ui(e?.conditions ?? []);
-    this.visualConditions = r, this.conditionMode = "visual", this.conditionsYaml = e?.conditions.length ? re(e.conditions, { noRefs: !0 }) : "", this.conditionFailure = e?.condition_failure ?? "skip", this.overduePolicy = e?.overdue_policy ?? "", this.overdueGraceMinutes = e?.overdue_grace ? String(e.effective_overdue_grace_minutes) : "", this.validUntil = e?.valid_until ? wr(e.valid_until, this.timeZone) : "", this.scheduleMode = "delay", this.creationKind = "later", this.jobKey = e?.job_key ?? "", this.previewDelay = 20, this.previewUnit = "minutes", this.editor = { job: e, mode: "visual" }, this.menuJobId = void 0, this.error = void 0, this.errorDetails = void 0;
+    this.visualConditions = r, this.conditionMode = "visual", this.conditionsYaml = e?.conditions.length ? re(e.conditions, { noRefs: !0 }) : "", this.conditionFailure = e?.condition_failure ?? "skip", this.overduePolicy = e?.overdue_policy ?? "", this.overdueGraceMinutes = e?.overdue_grace ? String(e.effective_overdue_grace_minutes) : "", this.validUntil = e?.valid_until ? Sr(e.valid_until, this.timeZone) : "", this.scheduleMode = "delay", this.creationKind = "later", this.jobKey = e?.job_key ?? "", this.previewDelay = 20, this.previewUnit = "minutes", this.editor = { job: e, mode: "visual" }, this.menuJobId = void 0, this.error = void 0, this.errorDetails = void 0;
   }
   openRunFor() {
     this.openEditor(), this.creationKind = "run_for";
@@ -2744,7 +2745,7 @@ let L = class extends Le {
       this.runForTarget = e.detail.value;
     }}></ha-target-picker><small>Choose entities, devices, or areas.</small></label>
       <div class="two"><label>Start action<ha-service-picker .hass=${this.hass} .value=${this.runForStart} @value-changed=${(e) => {
-      this.runForStart = e.detail.value, this.runForEnd = Cr[e.detail.value] ?? "";
+      this.runForStart = e.detail.value, this.runForEnd = Er[e.detail.value] ?? "";
     }}></ha-service-picker></label><label>End action<ha-service-picker .hass=${this.hass} .value=${this.runForEnd} @value-changed=${(e) => {
       this.runForEnd = e.detail.value;
     }}></ha-service-picker><small>Suggested only for conservative, known opposite actions; otherwise choose one explicitly.</small></label></div>
