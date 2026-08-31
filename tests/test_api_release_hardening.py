@@ -1,6 +1,7 @@
 """Regression tests for service validation and release metadata."""
 
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -42,8 +43,17 @@ def test_extend_schema_keeps_signed_duration_support() -> None:
     assert data["duration"]["minutes"] == -5
 
 
-def test_manifest_uses_next_release_version_and_panel_url_is_not_version_coupled() -> None:
+def test_release_metadata_uses_one_version_and_panel_url_is_not_version_coupled() -> None:
     root = Path(__file__).parents[1]
     manifest = json.loads((root / "custom_components/deferred_actions/manifest.json").read_text())
-    assert manifest["version"] == "1.7.0"
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text())
+    frontend_package = json.loads((root / "frontend/package.json").read_text())
+    frontend_lock = json.loads((root / "frontend/package-lock.json").read_text())
+
+    version = manifest["version"]
+    assert version == "1.7.0"
+    assert pyproject["project"]["version"] == version
+    assert frontend_package["version"] == version
+    assert frontend_lock["version"] == version
+    assert frontend_lock["packages"][""]["version"] == version
     assert PANEL_JS_URL == "/deferred_actions_frontend/deferred-actions-panel.js"
