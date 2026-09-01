@@ -32,25 +32,25 @@ SPECS = (
     VersionSpec(
         "Home Assistant manifest",
         "custom_components/deferred_actions/manifest.json",
-        r'(^  "version": ")([^"]+)("$)',
+        r'(^  "version": ")([^"]+)("(?=,?$))',
         re.MULTILINE,
     ),
     VersionSpec(
         "frontend package",
         "frontend/package.json",
-        r'(^  "version": ")([^"]+)("$)',
+        r'(^  "version": ")([^"]+)("(?=,?$))',
         re.MULTILINE,
     ),
     VersionSpec(
         "frontend lockfile",
         "frontend/package-lock.json",
-        r'(^  "version": ")([^"]+)("$)',
+        r'(^  "version": ")([^"]+)("(?=,?$))',
         re.MULTILINE,
     ),
     VersionSpec(
         "frontend lockfile root package",
         "frontend/package-lock.json",
-        r'("packages": \{\n    "": \{\n      "name": "deferred-actions-frontend",\n      "version": ")([^"]+)(")',
+        r'("packages": \{\n    "": \{\n      "name": "deferred-actions-frontend",\n      "version": ")([^"]+)("(?=,\n))',
     ),
 )
 
