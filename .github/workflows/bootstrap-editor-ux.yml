@@ -1,0 +1,45 @@
+name: Bootstrap editor UX
+
+on:
+  push:
+    branches:
+      - feat/editor-ux-version-sync
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply editor UX refactor
+        run: python scripts/bootstrap_editor_ux.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Typecheck frontend
+        working-directory: frontend
+        run: npm run typecheck
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+      - name: Test frontend
+        working-directory: frontend
+        run: npm test
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+      - name: Commit generated source and bundle
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add frontend/src/deferred-actions-panel.ts custom_components/deferred_actions/frontend/deferred-actions-panel.js
+          git commit -m "feat: improve deferred action editor hierarchy"
+          git push
