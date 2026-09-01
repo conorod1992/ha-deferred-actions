@@ -32,4 +32,33 @@ describe("editor preview", () => {
     expect(preview).not.toContain("Run light.turn_on");
     expect(preview).toContain("Conditions are checked at run time; if unmet, the job fails.");
   });
+
+  it("keeps compact section summaries in sync with editor state", () => {
+    const panel = new DeferredActionsPanel() as unknown as Record<string, unknown>;
+    panel.hass = { config: { time_zone: "UTC" } } as HomeAssistant;
+    (panel.openEditor as () => void)();
+
+    expect((panel.editorScheduleStatus as () => string)()).toBe("In 20 minutes");
+    expect((panel.editorActionStatus as () => string)()).toBe("1 action");
+    expect((panel.editorConditionCount as () => number | undefined)()).toBe(0);
+
+    panel.previewDelay = 1;
+    panel.previewUnit = "hours";
+    panel.visualActions = sequenceToVisual([
+      { action: "light.turn_on" },
+      { action: "light.turn_off" },
+    ]);
+    panel.visualConditions = {
+      operator: "and",
+      items: [{ type: "state", entity_id: "binary_sensor.home", state: "on", metadata: {} }],
+    };
+
+    expect((panel.editorScheduleStatus as () => string)()).toBe("In 1 hour");
+    expect((panel.editorActionStatus as () => string)()).toBe("2 actions");
+    expect((panel.editorConditionCount as () => number | undefined)()).toBe(1);
+
+    panel.conditionMode = "yaml";
+    panel.conditionsYaml = "[";
+    expect((panel.editorConditionCount as () => number | undefined)()).toBeUndefined();
+  });
 });

@@ -1,6 +1,8 @@
 """Regression tests for service validation and release metadata."""
 
 import json
+import re
+import shutil
 import tomllib
 from pathlib import Path
 
@@ -9,6 +11,7 @@ import voluptuous as vol
 
 from custom_components.deferred_actions.const import PANEL_JS_URL
 from custom_components.deferred_actions.services import SERVICE_NAMES, SERVICE_SCHEMAS
+from scripts.set_release_version import current_version, set_release_version
 
 
 def test_every_registered_service_has_an_explicit_schema() -> None:
@@ -51,9 +54,28 @@ def test_release_metadata_uses_one_version_and_panel_url_is_not_version_coupled(
     frontend_lock = json.loads((root / "frontend/package-lock.json").read_text())
 
     version = manifest["version"]
-    assert version == "1.7.0"
+    assert re.fullmatch(r"\d+\.\d+\.\d+", version)
     assert pyproject["project"]["version"] == version
     assert frontend_package["version"] == version
     assert frontend_lock["version"] == version
     assert frontend_lock["packages"][""]["version"] == version
+    assert current_version(root) == version
     assert PANEL_JS_URL == "/deferred_actions_frontend/deferred-actions-panel.js"
+
+
+def test_release_version_helper_updates_every_metadata_file(tmp_path: Path) -> None:
+    root = Path(__file__).parents[1]
+    tracked = (
+        Path("pyproject.toml"),
+        Path("custom_components/deferred_actions/manifest.json"),
+        Path("frontend/package.json"),
+        Path("frontend/package-lock.json"),
+    )
+    for relative in tracked:
+        destination = tmp_path / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(root / relative, destination)
+
+    assert current_version(tmp_path) == current_version(root)
+    set_release_version("9.8.7", tmp_path)
+    assert current_version(tmp_path) == "9.8.7"
