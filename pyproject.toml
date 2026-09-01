@@ -1,6 +1,6 @@
 [project]
 name = "ha-deferred-actions"
-version = "1.7.0"
+version = "1.8.0"
 description = "Persistent one-off action scheduler for Home Assistant"
 requires-python = ">=3.12"
 license = "MIT"
