@@ -984,8 +984,25 @@ class DeferredActionsManager:
                 raise RevisionConflictError(
                     f"Expected revision {expected_revision}, current revision is {job.revision}"
                 )
-            if "job_key" in changes and changes["job_key"] in self._create_reservations:
-                raise ConflictError("A create is in progress for that job_key")
+            if "job_key" in changes:
+                new_job_key = changes["job_key"]
+                if new_job_key in self._create_reservations:
+                    raise ConflictError("A create is in progress for that job_key")
+                if new_job_key is not None and new_job_key != job.job_key:
+                    conflict = next(
+                        (
+                            other
+                            for other in self.jobs.values()
+                            if other.id != job.id
+                            and other.job_key == new_job_key
+                            and other.status in {JobStatus.PENDING, JobStatus.PAUSED}
+                        ),
+                        None,
+                    )
+                    if conflict is not None:
+                        raise ConflictError(
+                            f"An active job already uses job_key {new_job_key}"
+                        )
             if "valid_until" in changes:
                 changes["valid_until"] = self._parse_valid_until(
                     changes["valid_until"], job.execute_at
