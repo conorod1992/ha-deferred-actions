@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -11,6 +12,8 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 
 from .const import DOMAIN, INVERSE_ACTIONS
 from .models import DeferredActionsError
+
+_LOGGER = logging.getLogger(__name__)
 
 SERVICE_NAMES = (
     "create",
@@ -259,11 +262,11 @@ async def async_run_for(
     attribution: dict[str, Any],
     context=None,
 ) -> dict[str, Any]:
-    """Preflight known create failures, run the start, then durably create the end job.
+    """Run the start sequence and durably schedule its eventual end sequence.
 
-    A Store I/O failure during the final commit can still occur after the start
-    sequence has succeeded; callers receive that failure and no partial job remains
-    in the manager.
+    Once start execution begins, any failure before the end job is committed causes
+    the end sequence to run immediately as a best-effort compensation. This keeps a
+    failed or cancelled run-for operation from leaving devices in its temporary state.
     """
     from homeassistant.helpers.script import Script
 
@@ -305,15 +308,28 @@ async def async_run_for(
         attribution=attribution,
         linkage={"operation": "run_for", "start_action": start_action, "end_action": end_action},
     )
-    script = Script(manager.hass, start_sequence, "Deferred Actions run-for start", DOMAIN)
+    start_script = Script(manager.hass, start_sequence, "Deferred Actions run-for start", DOMAIN)
+    end_script = Script(manager.hass, end_sequence, "Deferred Actions run-for compensation", DOMAIN)
+    start_attempted = False
+
+    async def _run_start() -> None:
+        nonlocal start_attempted
+        start_attempted = True
+        await start_script.async_run(context=context)
+
     try:
-        await manager.async_run_owned(
-            lambda: script.async_run(context=context), "Deferred Actions run-for start"
-        )
+        await manager.async_run_owned(_run_start, "Deferred Actions run-for start")
         prepared.job.execute_at = manager._calculate_time(None, duration)
         return await manager.async_commit_create(prepared)
     except BaseException:
         await manager.async_abort_create(prepared)
+        if start_attempted:
+            try:
+                await end_script.async_run(context=context)
+            except BaseException:
+                _LOGGER.exception(
+                    "Failed to compensate run-for operation after start or commit failure"
+                )
         raise
 
 
