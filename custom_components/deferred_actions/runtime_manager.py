@@ -42,7 +42,9 @@ class DeferredActionsManager(BaseDeferredActionsManager):
                     EVENT_PREFIX + event.removeprefix("job_"), self._event_data(job)
                 )
             except Exception:
-                _LOGGER.exception("Deferred Actions event-bus notification failed handling %s", event)
+                _LOGGER.exception(
+                    "Deferred Actions event-bus notification failed handling %s", event
+                )
 
         summary_event = {"event": "queue_summary", "summary": self.summary()}
         for listener in tuple(self._listeners):
