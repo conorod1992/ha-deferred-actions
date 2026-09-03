@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any
@@ -264,9 +265,10 @@ async def async_run_for(
 ) -> dict[str, Any]:
     """Run the start sequence and durably schedule its eventual end sequence.
 
-    Once start execution begins, any failure before the end job is committed causes
-    the end sequence to run immediately as a best-effort compensation. This keeps a
-    failed or cancelled run-for operation from leaving devices in its temporary state.
+    Cancellation during the start is compensated because partial side effects may
+    already exist. Ordinary start-sequence errors are surfaced without running an
+    arbitrary end sequence. Once the start completes, any failure to commit the end
+    job is compensated immediately.
     """
     from homeassistant.helpers.script import Script
 
@@ -310,26 +312,32 @@ async def async_run_for(
     )
     start_script = Script(manager.hass, start_sequence, "Deferred Actions run-for start", DOMAIN)
     end_script = Script(manager.hass, end_sequence, "Deferred Actions run-for compensation", DOMAIN)
-    start_attempted = False
 
-    async def _run_start() -> None:
-        nonlocal start_attempted
-        start_attempted = True
-        await start_script.async_run(context=context)
+    async def _compensate() -> None:
+        try:
+            await end_script.async_run(context=context)
+        except BaseException:
+            _LOGGER.exception("Failed to compensate run-for operation")
 
     try:
-        await manager.async_run_owned(_run_start, "Deferred Actions run-for start")
-        prepared.job.execute_at = manager._calculate_time(None, duration)
+        await manager.async_run_owned(
+            lambda: start_script.async_run(context=context),
+            "Deferred Actions run-for start",
+        )
+    except asyncio.CancelledError:
+        await manager.async_abort_create(prepared)
+        await _compensate()
+        raise
+    except BaseException:
+        await manager.async_abort_create(prepared)
+        raise
+
+    prepared.job.execute_at = manager._calculate_time(None, duration)
+    try:
         return await manager.async_commit_create(prepared)
     except BaseException:
         await manager.async_abort_create(prepared)
-        if start_attempted:
-            try:
-                await end_script.async_run(context=context)
-            except BaseException:
-                _LOGGER.exception(
-                    "Failed to compensate run-for operation after start or commit failure"
-                )
+        await _compensate()
         raise
 
 

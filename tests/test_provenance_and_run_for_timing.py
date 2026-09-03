@@ -105,6 +105,36 @@ async def test_run_for_rebases_duration_after_start_sequence(manager) -> None:
     assert result["execute_at"] == "2026-08-31T12:07:00Z"
 
 
+async def test_run_for_does_not_compensate_normal_start_failure(manager) -> None:
+    validators = AsyncMock(side_effect=lambda _hass, value: value)
+    start_script = MagicMock()
+    start_script.async_run = AsyncMock(side_effect=RuntimeError("start failed"))
+    end_script = MagicMock()
+    end_script.async_run = AsyncMock()
+    script_factory = MagicMock(side_effect=[start_script, end_script])
+
+    with (
+        patch("homeassistant.helpers.script.Script", script_factory),
+        patch("custom_components.deferred_actions.executor.async_validate_sequence", validators),
+        patch("custom_components.deferred_actions.manager.async_validate_sequence", validators),
+    ):
+        with pytest.raises(RuntimeError, match="start failed"):
+            await async_run_for(
+                manager,
+                {
+                    "duration": {"minutes": 5},
+                    "start_sequence": [{"action": "light.turn_on"}],
+                    "end_sequence": [{"action": "light.turn_off"}],
+                    "job_key": "run-for-start-failure",
+                },
+                attribution={"source": "service"},
+            )
+
+    start_script.async_run.assert_awaited_once()
+    end_script.async_run.assert_not_awaited()
+    assert not manager._create_reservations
+
+
 async def test_run_for_compensates_when_commit_fails(manager) -> None:
     validators = AsyncMock(side_effect=lambda _hass, value: value)
     start_script = MagicMock()
