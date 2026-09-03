@@ -1000,9 +1000,7 @@ class DeferredActionsManager:
                         None,
                     )
                     if conflict is not None:
-                        raise ConflictError(
-                            f"An active job already uses job_key {new_job_key}"
-                        )
+                        raise ConflictError(f"An active job already uses job_key {new_job_key}")
             if "valid_until" in changes:
                 changes["valid_until"] = self._parse_valid_until(
                     changes["valid_until"], job.execute_at
