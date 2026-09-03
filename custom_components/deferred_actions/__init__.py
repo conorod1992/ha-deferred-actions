@@ -24,7 +24,7 @@ from .const import (
     PANEL_URL,
     PLATFORMS,
 )
-from .manager import DeferredActionsManager
+from .runtime_manager import DeferredActionsManager
 from .services import async_register_services, async_unregister_services
 from .websocket import async_register_websocket_commands
 
