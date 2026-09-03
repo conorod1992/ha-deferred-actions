@@ -249,7 +249,10 @@ async def test_run_for_commit_failure_is_surfaced_without_corrupting_other_jobs(
             attribution={"source": "service"},
         )
 
-    script.return_value.async_run.assert_awaited_once()
+    assert script.call_count == 2
+    assert script.call_args_list[0].args[1] == [{"action": "light.turn_on"}]
+    assert script.call_args_list[1].args[1] == [{"action": "light.turn_off"}]
+    assert script.return_value.async_run.await_count == 2
     assert list(manager.jobs) == [unrelated["id"]]
     assert manager.jobs[unrelated["id"]].name == "Unrelated"
     assert manager.jobs[unrelated["id"]].revision == unrelated["revision"]
